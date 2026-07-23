@@ -1,0 +1,8 @@
+agent-sync
+agent-sync.db
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+dist/
+node_modules/
