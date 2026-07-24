@@ -6,3 +6,8 @@ agent-sync.db
 .DS_Store
 dist/
 node_modules/
+
+
+#mds
+workflow.md
+PRD.md

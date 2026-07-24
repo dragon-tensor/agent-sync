@@ -3,29 +3,76 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent Sync</title>
+<title>dragon SYNC</title>
 <style>
 :root {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --border: #30363d;
+  --bg: #0B1210;
+  --surface: #121A17;
+  --border: #3A9B8E;
   --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #58a6ff;
-  --green: #3fb950;
+  --muted: #8AA39A;
+  --accent: #7FDBCA;
+  --seafoam-1: #9FE2BF;
+  --seafoam-2: #7FDBCA;
+  --seafoam-3: #5EC4B0;
+  --light-blue-1: #7EC8E3;
+  --light-blue-2: #A8D8EA;
+  --green: #9FE2BF;
   --yellow: #d29922;
   --red: #f85149;
-  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, monospace;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; }
 .app { display: flex; min-height: 100vh; }
 .sidebar { width: 240px; background: var(--surface); border-right: 1px solid var(--border); padding: 16px; }
-.sidebar h1 { font-size: 18px; margin-bottom: 24px; color: var(--accent); }
-.sidebar h1 span { color: var(--muted); font-size: 14px; }
+.logo {
+  margin-bottom: 20px;
+  line-height: 1.05;
+}
+.logo-block {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 7px;
+  font-weight: 700;
+  white-space: pre;
+  letter-spacing: 0;
+}
+.logo-dragon {
+  background: linear-gradient(
+    90deg,
+    var(--seafoam-1),
+    var(--seafoam-2),
+    var(--seafoam-3),
+    var(--light-blue-1),
+    var(--light-blue-2),
+    var(--seafoam-2),
+    var(--seafoam-1)
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: seafoam-wave 3.2s linear infinite;
+}
+.logo-sync {
+  color: #FFFFFF;
+  margin-top: 6px;
+}
+.logo-tag {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+@keyframes seafoam-wave {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 220% 50%; }
+}
+.sidebar .logo-meta { color: var(--muted); font-size: 11px; font-weight: 400; margin-top: 6px; }
 .nav-item { padding: 8px 12px; cursor: pointer; border-radius: 6px; margin-bottom: 4px; font-size: 14px; color: var(--muted); }
-.nav-item:hover { background: #1c2128; color: var(--text); }
-.nav-item.active { background: #1c2128; color: var(--accent); }
+.nav-item:hover { background: #1a2420; color: var(--text); }
+.nav-item.active { background: #1a2420; color: var(--accent); }
 .main { flex: 1; padding: 24px; overflow-y: auto; }
 .header { margin-bottom: 24px; }
 .header h2 { font-size: 24px; margin-bottom: 8px; }
@@ -33,15 +80,15 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); min-
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .card h3 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
-.card .value { font-size: 28px; font-weight: 600; color: var(--accent); }
+.card .value { font-size: 28px; font-weight: 600; color: var(--light-blue-1); }
 .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
 .search-bar input { flex: 1; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px; }
-.search-bar button { padding: 8px 16px; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.search-bar button { padding: 8px 16px; background: var(--accent); color: #0B1210; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
 td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
-tr:hover { background: #1c2128; }
+tr:hover { background: #1a2420; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
 .badge-claude-code { background: #1a3a2a; color: #3fb950; }
 .badge-opencode { background: #1a2a3a; color: #58a6ff; }
@@ -50,7 +97,7 @@ tr:hover { background: #1c2128; }
 .provider-status.on { background: var(--green); }
 .provider-status.off { background: var(--red); }
 .btn { padding: 6px 12px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; }
-.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary { background: var(--accent); color: #0B1210; font-weight: 600; }
 .btn-danger { background: var(--red); color: #fff; }
 .btn-sm { padding: 4px 8px; font-size: 12px; }
 .mt-2 { margin-top: 12px; }
@@ -62,7 +109,7 @@ input[type="text"] { width: 100%; padding: 8px 12px; background: var(--surface);
 .modal-content { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 90%; max-width: 600px; max-height: 80vh; overflow-y: auto; }
 .modal h3 { margin-bottom: 16px; }
 .message { padding: 12px; margin-bottom: 8px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
-.message.user { background: #1a2a3a; border-left: 3px solid var(--accent); }
+.message.user { background: #1a2a3a; border-left: 3px solid var(--light-blue-1); }
 .message.assistant { background: #1a3a2a; border-left: 3px solid var(--green); }
 .message .role { font-size: 11px; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
 .empty { color: var(--muted); text-align: center; padding: 48px; font-size: 14px; }
@@ -74,7 +121,22 @@ input[type="text"] { width: 100%; padding: 8px 12px; background: var(--surface);
 <body>
 <div class="app">
   <div class="sidebar">
-    <h1>agent-sync <span>v0.1</span></h1>
+    <div class="logo" aria-label="dragon SYNC">
+<pre class="logo-block logo-dragon">██████╗ ██████╗  █████╗  ██████╗  ██████╗ ███╗   ██╗
+██╔══██╗██╔══██╗██╔══██╗██╔════╝ ██╔═══██╗████╗  ██║
+██║  ██║██████╔╝███████║██║  ███╗██║   ██║██╔██╗ ██║
+██║  ██║██╔══██╗██╔══██║██║   ██║██║   ██║██║╚██╗██║
+██████╔╝██║  ██║██║  ██║╚██████╔╝╚██████╔╝██║ ╚████║
+╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝</pre>
+<pre class="logo-block logo-sync">███████╗██╗   ██╗███╗   ██╗ ██████╗
+██╔════╝╚██╗ ██╔╝████╗  ██║██╔════╝
+███████╗ ╚████╔╝ ██╔██╗ ██║██║
+╚════██║  ╚██╔╝  ██║╚██╗██║██║
+███████║   ██║   ██║ ╚████║╚██████╗
+╚══════╝   ╚═╝   ╚═╝  ╚═══╝ ╚═════╝</pre>
+      <div class="logo-tag">local context · every agent</div>
+      <div class="logo-meta">v0.1</div>
+    </div>
     <div class="nav-item active" data-panel="dashboard">Dashboard</div>
     <div class="nav-item" data-panel="sessions">Sessions</div>
     <div class="nav-item" data-panel="context">Context</div>

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -73,6 +74,7 @@ type model struct {
 	inputFn    func(string)
 
 	statusMsg string
+	wavePhase int
 }
 
 type keyMap struct {
@@ -153,8 +155,16 @@ func New(database *db.DB, reg *sync.Registry, store *context.Store, mergeEng *co
 	}
 }
 
+type waveTickMsg time.Time
+
+func waveTick() tea.Cmd {
+	return tea.Tick(90*time.Millisecond, func(t time.Time) tea.Msg {
+		return waveTickMsg(t)
+	})
+}
+
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.loadStatsCmd(), m.loadAllCmd())
+	return tea.Batch(m.loadStatsCmd(), m.loadAllCmd(), waveTick())
 }
 
 func (m *model) loadStatsCmd() tea.Cmd {
@@ -243,6 +253,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusMsg:
 		m.statusMsg = msg.msg
+
+	case waveTickMsg:
+		m.wavePhase++
+		return m, waveTick()
 	}
 
 	return m, tea.Batch(cmds...)
@@ -511,8 +525,17 @@ func (m *model) headerView() string {
 		}
 	}
 
-	return tabBarStyle.Render(
+	tabsRow := tabBarStyle.Render(
 		lipgloss.JoinHorizontal(lipgloss.Top, rendered...),
+	)
+
+	// Dashboard owns the boxed splash logo; other tabs use the compact wordmark.
+	if m.activeTab == dashboardTab {
+		return tabsRow
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		LogoWordmark(m.wavePhase),
+		tabsRow,
 	)
 }
 
@@ -596,6 +619,8 @@ func (m *model) dashboardView() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
+		LogoBlock(m.wavePhase),
+		"",
 		headerStyle.Render("Dashboard"),
 		"",
 		statsRow,
