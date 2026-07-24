@@ -409,6 +409,56 @@ func (db *DB) SaveEntity(e *types.Entity) error {
 	return err
 }
 
+// FindEntitiesByNameType returns entities with the same canonical name and type (any session/source).
+func (db *DB) FindEntitiesByNameType(name, entityType string) ([]types.Entity, error) {
+	rows, err := db.Query(`SELECT id, name, entity_type, summary, content, source, source_id, session_id, confidence, created_at, updated_at
+		FROM entities WHERE name = ? AND entity_type = ? ORDER BY created_at ASC`, name, entityType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []types.Entity
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		entities = append(entities, e)
+	}
+	if entities == nil {
+		entities = []types.Entity{}
+	}
+	return entities, nil
+}
+
+func (db *DB) GetEntity(id string) (*types.Entity, error) {
+	rows, err := db.Query(`SELECT id, name, entity_type, summary, content, source, source_id, session_id, confidence, created_at, updated_at
+		FROM entities WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, sql.ErrNoRows
+	}
+	e, err := scanEntity(rows)
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+// HasConflictPair reports whether a contradicts relation already exists between two entities.
+func (db *DB) HasConflictPair(a, b string) bool {
+	var n int
+	err := db.QueryRow(`SELECT COUNT(*) FROM entity_relations
+		WHERE relation_type = 'contradicts'
+		  AND ((source_entity_id = ? AND target_entity_id = ?)
+		    OR (source_entity_id = ? AND target_entity_id = ?))`, a, b, b, a).Scan(&n)
+	return err == nil && n > 0
+}
+
 func (db *DB) ListEntities(entityType string, limit, offset int) ([]types.Entity, error) {
 	query := `SELECT id, name, entity_type, summary, content, source, source_id, session_id, confidence, created_at, updated_at FROM entities`
 	args := []interface{}{}

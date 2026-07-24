@@ -335,17 +335,29 @@ func (m *model) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	switch {
-	case key.Matches(msg, m.keys.Number1):
-		m.activeTab = dashboardTab
-	case key.Matches(msg, m.keys.Number2):
-		m.activeTab = sessionsTab
-	case key.Matches(msg, m.keys.Number3):
-		m.activeTab = contextTab
-	case key.Matches(msg, m.keys.Number4):
-		m.activeTab = groupsTab
-	case key.Matches(msg, m.keys.Number5):
+	// On Context tab, 1-4 are sub-modes (entries/entities/conflicts/snapshots).
+	// Elsewhere, 1-5 switch main tabs.
+	if m.activeTab != contextTab {
+		switch {
+		case key.Matches(msg, m.keys.Number1):
+			m.activeTab = dashboardTab
+			return m, nil
+		case key.Matches(msg, m.keys.Number2):
+			m.activeTab = sessionsTab
+			return m, nil
+		case key.Matches(msg, m.keys.Number3):
+			m.activeTab = contextTab
+			return m, nil
+		case key.Matches(msg, m.keys.Number4):
+			m.activeTab = groupsTab
+			return m, nil
+		case key.Matches(msg, m.keys.Number5):
+			m.activeTab = providersTab
+			return m, nil
+		}
+	} else if key.Matches(msg, m.keys.Number5) {
 		m.activeTab = providersTab
+		return m, nil
 	}
 
 	if m.showSession {

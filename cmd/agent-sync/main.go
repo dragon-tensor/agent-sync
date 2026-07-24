@@ -965,11 +965,16 @@ func buildSnapshotCmd() *cobra.Command {
 		},
 	})
 
-	cmd.AddCommand(&cobra.Command{
+	exportCmd := &cobra.Command{
 		Use:   "export <id>",
-		Short: "Export a snapshot as a compact handoff prompt",
+		Short: "Export a snapshot as prompt, markdown, or JSON",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			format, _ := cmd.Flags().GetString("format")
+			if format == "" {
+				format = "prompt"
+			}
+
 			snapshots, err := dbase.ListSnapshots()
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
@@ -987,55 +992,73 @@ func buildSnapshotCmd() *cobra.Command {
 				return
 			}
 
-			entities, err := dbase.ListEntities("", 1000, 0)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				return
-			}
-
-			entityMap := make(map[string]types.Entity)
-			for _, e := range entities {
-				entityMap[e.ID] = e
-			}
-
-			fmt.Printf("# Context Snapshot: %s\n\n", snapshot.Name)
-			if snapshot.Description != "" {
-				fmt.Printf("%s\n\n", snapshot.Description)
-			}
-			fmt.Printf("## Key Context\n\n")
-
+			var entities []types.Entity
 			for _, eid := range snapshot.EntityIDs {
-				e, ok := entityMap[eid]
-				if !ok {
+				e, err := dbase.GetEntity(eid)
+				if err != nil {
 					continue
 				}
-				switch e.EntityType {
-				case types.EntityDecision:
-					fmt.Printf("- **Decision**: %s\n", e.Summary)
-				case types.EntityFact:
-					fmt.Printf("- **Fact**: %s\n", e.Summary)
-				case types.EntityPreference:
-					fmt.Printf("- **Preference**: %s\n", e.Summary)
-				case types.EntityGoal:
-					fmt.Printf("- **Goal**: %s\n", e.Summary)
-				case types.EntityCode:
-					fmt.Printf("- **Code pattern**: %s\n", e.Summary)
-				default:
-					fmt.Printf("- %s\n", e.Summary)
-				}
+				entities = append(entities, *e)
 			}
 
-			conflicts, _ := dbase.ListConflicts()
-			if len(conflicts) > 0 {
-				fmt.Printf("\n## Active Conflicts\n\n")
-				for _, c := range conflicts {
-					fmt.Printf("- ⚠️ %s\n", c.Evidence)
-				}
-			}
+			switch format {
+			case "json":
+				data, _ := json.MarshalIndent(map[string]interface{}{
+					"snapshot": snapshot,
+					"entities": entities,
+				}, "", "  ")
+				fmt.Println(string(data))
 
-			fmt.Printf("\n---\n*Exported from agent-sync on %s*\n", time.Now().Format("Jan 02 2006 15:04"))
+			case "md", "markdown", "prompt":
+				fmt.Printf("# Context Snapshot: %s\n\n", snapshot.Name)
+				if snapshot.Description != "" {
+					fmt.Printf("%s\n\n", snapshot.Description)
+				}
+				fmt.Printf("## Key Context\n\n")
+				for _, e := range entities {
+					switch e.EntityType {
+					case types.EntityDecision:
+						fmt.Printf("- **Decision**: %s\n", e.Summary)
+					case types.EntityFact:
+						fmt.Printf("- **Fact**: %s\n", e.Summary)
+					case types.EntityPreference:
+						fmt.Printf("- **Preference**: %s\n", e.Summary)
+					case types.EntityGoal:
+						fmt.Printf("- **Goal**: %s\n", e.Summary)
+					case types.EntityCode:
+						fmt.Printf("- **Code pattern**: %s\n", e.Summary)
+					default:
+						fmt.Printf("- %s\n", e.Summary)
+					}
+				}
+				if format == "prompt" {
+					conflicts, _ := dbase.ListConflicts()
+					idSet := map[string]bool{}
+					for _, eid := range snapshot.EntityIDs {
+						idSet[eid] = true
+					}
+					var relevant []types.EntityRelation
+					for _, c := range conflicts {
+						if idSet[c.SourceEntityID] || idSet[c.TargetEntityID] {
+							relevant = append(relevant, c)
+						}
+					}
+					if len(relevant) > 0 {
+						fmt.Printf("\n## Active Conflicts\n\n")
+						for _, c := range relevant {
+							fmt.Printf("- ⚠️ %s\n", c.Evidence)
+						}
+					}
+				}
+				fmt.Printf("\n---\n*Exported from agent-sync on %s*\n", time.Now().Format("Jan 02 2006 15:04"))
+
+			default:
+				fmt.Printf("Unknown format %q (use prompt, json, md)\n", format)
+			}
 		},
-	})
+	}
+	exportCmd.Flags().String("format", "prompt", "Export format: prompt|json|md")
+	cmd.AddCommand(exportCmd)
 
 	cmd.PersistentFlags().String("description", "", "Snapshot description")
 	cmd.PersistentFlags().StringSlice("entity-ids", nil, "Entity IDs to include")

@@ -38,6 +38,7 @@ type ExtractResult struct {
 func (e *Extractor) ExtractFromMessages(session *types.Session, messages []types.Message) (*ExtractResult, error) {
 	result := &ExtractResult{}
 	seenEntities := make(map[string]bool)
+	var forEdges []types.Entity
 
 	fullContent := ""
 	for _, msg := range messages {
@@ -46,86 +47,88 @@ func (e *Extractor) ExtractFromMessages(session *types.Session, messages []types
 		}
 	}
 
-	decisions := e.extractDecisions(fullContent, session)
-	for i := range decisions {
-		key := decisions[i].Name + string(decisions[i].EntityType)
-		if !seenEntities[key] {
-			decisions[i].SessionID = session.ID
-			decisions[i].Source = string(session.Provider)
-			if err := e.db.SaveEntity(&decisions[i]); err == nil {
-				result.Entities = append(result.Entities, decisions[i])
-				seenEntities[key] = true
-			}
+	candidates := []types.Entity{}
+	candidates = append(candidates, e.extractDecisions(fullContent, session)...)
+	candidates = append(candidates, e.extractFacts(fullContent, session)...)
+	candidates = append(candidates, e.extractPreferences(fullContent, session)...)
+	candidates = append(candidates, e.extractGoals(fullContent, session)...)
+	candidates = append(candidates, e.extractCodePatterns(fullContent, session)...)
+
+	for i := range candidates {
+		ent := &candidates[i]
+		ent.SessionID = session.ID
+		ent.Source = string(session.Provider)
+
+		key := ent.Name + string(ent.EntityType)
+		if seenEntities[key] {
+			continue
 		}
+
+		saved, conflicts, created, err := e.upsertEntity(ent)
+		if err != nil || saved == nil {
+			continue
+		}
+		seenEntities[key] = true
+		forEdges = append(forEdges, *saved)
+		if created {
+			result.Entities = append(result.Entities, *saved)
+		}
+		result.Conflicts = append(result.Conflicts, conflicts...)
 	}
 
-	facts := e.extractFacts(fullContent, session)
-	for i := range facts {
-		key := facts[i].Name + string(facts[i].EntityType)
-		if !seenEntities[key] {
-			facts[i].SessionID = session.ID
-			facts[i].Source = string(session.Provider)
-			if err := e.db.SaveEntity(&facts[i]); err == nil {
-				result.Entities = append(result.Entities, facts[i])
-				seenEntities[key] = true
-			}
-		}
-	}
-
-	prefs := e.extractPreferences(fullContent, session)
-	for i := range prefs {
-		key := prefs[i].Name + string(prefs[i].EntityType)
-		if !seenEntities[key] {
-			prefs[i].SessionID = session.ID
-			prefs[i].Source = string(session.Provider)
-			if err := e.db.SaveEntity(&prefs[i]); err == nil {
-				result.Entities = append(result.Entities, prefs[i])
-				seenEntities[key] = true
-			}
-		}
-	}
-
-	goals := e.extractGoals(fullContent, session)
-	for i := range goals {
-		key := goals[i].Name + string(goals[i].EntityType)
-		if !seenEntities[key] {
-			goals[i].SessionID = session.ID
-			goals[i].Source = string(session.Provider)
-			if err := e.db.SaveEntity(&goals[i]); err == nil {
-				result.Entities = append(result.Entities, goals[i])
-				seenEntities[key] = true
-			}
-		}
-	}
-
-	codePats := e.extractCodePatterns(fullContent, session)
-	for i := range codePats {
-		key := codePats[i].Name + string(codePats[i].EntityType)
-		if !seenEntities[key] {
-			codePats[i].SessionID = session.ID
-			codePats[i].Source = string(session.Provider)
-			if err := e.db.SaveEntity(&codePats[i]); err == nil {
-				result.Entities = append(result.Entities, codePats[i])
-				seenEntities[key] = true
-			}
-		}
-	}
-
-	rels := e.buildCoOccurrenceEdges(result.Entities)
+	rels := e.buildCoOccurrenceEdges(forEdges)
 	for i := range rels {
 		if err := e.db.SaveEntityRelation(&rels[i]); err == nil {
 			result.Relations = append(result.Relations, rels[i])
 		}
 	}
 
-	conflicts := e.detectConflicts(result.Entities)
-	for i := range conflicts {
-		if err := e.db.SaveEntityRelation(&conflicts[i]); err == nil {
-			result.Conflicts = append(result.Conflicts, conflicts[i])
-		}
+	return result, nil
+}
+
+// upsertEntity dedups against the DB and flags cross-source contradictions.
+// Same session / near-duplicate summaries reuse the existing row; low overlap creates a conflict.
+func (e *Extractor) upsertEntity(ent *types.Entity) (*types.Entity, []types.EntityRelation, bool, error) {
+	existing, err := e.db.FindEntitiesByNameType(ent.Name, string(ent.EntityType))
+	if err != nil {
+		return nil, nil, false, err
 	}
 
-	return result, nil
+	var conflictTargets []types.Entity
+	for _, ex := range existing {
+		if ex.SessionID != "" && ex.SessionID == ent.SessionID {
+			return &ex, nil, false, nil
+		}
+		overlap := wordOverlapRatio(ex.Summary, ent.Summary)
+		if overlap >= 0.4 {
+			return &ex, nil, false, nil
+		}
+		conflictTargets = append(conflictTargets, ex)
+	}
+
+	if err := e.db.SaveEntity(ent); err != nil {
+		return nil, nil, false, err
+	}
+
+	var savedConflicts []types.EntityRelation
+	for _, ex := range conflictTargets {
+		if e.db.HasConflictPair(ent.ID, ex.ID) {
+			continue
+		}
+		overlap := wordOverlapRatio(ex.Summary, ent.Summary)
+		rel := types.EntityRelation{
+			ID:             uuid.New().String(),
+			SourceEntityID: ent.ID,
+			TargetEntityID: ex.ID,
+			RelationType:   "contradicts",
+			Weight:         1.0 - overlap,
+			Evidence:       fmt.Sprintf("%s: %q vs %q", ent.Name, ent.Summary, ex.Summary),
+		}
+		if err := e.db.SaveEntityRelation(&rel); err == nil {
+			savedConflicts = append(savedConflicts, rel)
+		}
+	}
+	return ent, savedConflicts, true, nil
 }
 
 func (e *Extractor) extractDecisions(content string, session *types.Session) []types.Entity {
@@ -288,36 +291,6 @@ func (e *Extractor) buildCoOccurrenceEdges(entities []types.Entity) []types.Enti
 		}
 	}
 	return relations
-}
-
-func (e *Extractor) detectConflicts(entities []types.Entity) []types.EntityRelation {
-	var conflicts []types.EntityRelation
-	byName := make(map[string][]types.Entity)
-	for _, ent := range entities {
-		byName[ent.Name] = append(byName[ent.Name], ent)
-	}
-
-	for name, ents := range byName {
-		if len(ents) < 2 {
-			continue
-		}
-		for i := 0; i < len(ents); i++ {
-			for j := i + 1; j < len(ents); j++ {
-				overlap := wordOverlapRatio(ents[i].Summary, ents[j].Summary)
-				if overlap < 0.4 && ents[i].EntityType == ents[j].EntityType {
-					conflicts = append(conflicts, types.EntityRelation{
-						ID:             uuid.New().String(),
-						SourceEntityID: ents[i].ID,
-						TargetEntityID: ents[j].ID,
-						RelationType:   "contradicts",
-						Weight:         1.0 - overlap,
-						Evidence:       fmt.Sprintf("%s: %q vs %q", name, ents[i].Summary, ents[j].Summary),
-					})
-				}
-			}
-		}
-	}
-	return conflicts
 }
 
 func toEntityName(text string) string {

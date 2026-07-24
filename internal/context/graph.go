@@ -55,6 +55,7 @@ func (g *GraphQuery) BuildGraph() (*KnowledgeGraph, error) {
 		}
 	}
 
+	seenEdge := make(map[string]bool)
 	for _, e := range entities {
 		relations, err := g.db.ListEntityRelations(e.ID)
 		if err != nil {
@@ -80,7 +81,11 @@ func (g *GraphQuery) BuildGraph() (*KnowledgeGraph, error) {
 				node.Neighbors = append(node.Neighbors, edge)
 				node.Degree = len(node.Neighbors)
 			}
-			graph.Edges = append(graph.Edges, edge)
+			// Count each relation once in the global edge list.
+			if !seenEdge[rel.ID] {
+				seenEdge[rel.ID] = true
+				graph.Edges = append(graph.Edges, edge)
+			}
 		}
 	}
 
