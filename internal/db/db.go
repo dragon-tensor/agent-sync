@@ -398,6 +398,185 @@ func (db *DB) SetConfig(key, value string) error {
 	return err
 }
 
+func (db *DB) SaveEntity(e *types.Entity) error {
+	_, err := db.Exec(`INSERT INTO entities (id, name, entity_type, summary, content, source, source_id, session_id, confidence, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, entity_type=excluded.entity_type, summary=excluded.summary,
+			content=excluded.content, confidence=excluded.confidence, updated_at=excluded.updated_at`,
+		e.ID, e.Name, string(e.EntityType), e.Summary, e.Content, e.Source, e.SourceID,
+		e.SessionID, e.Confidence, e.CreatedAt.Format("2006-01-02 15:04:05"), e.UpdatedAt.Format("2006-01-02 15:04:05"))
+	return err
+}
+
+func (db *DB) ListEntities(entityType string, limit, offset int) ([]types.Entity, error) {
+	query := `SELECT id, name, entity_type, summary, content, source, source_id, session_id, confidence, created_at, updated_at FROM entities`
+	args := []interface{}{}
+	if entityType != "" {
+		query += " WHERE entity_type = ?"
+		args = append(args, entityType)
+	}
+	query += " ORDER BY updated_at DESC"
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	if offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", offset)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []types.Entity
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		entities = append(entities, e)
+	}
+	if entities == nil {
+		entities = []types.Entity{}
+	}
+	return entities, nil
+}
+
+func (db *DB) SearchEntities(query string, limit int) ([]types.Entity, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := db.Query(`SELECT id, name, entity_type, summary, content, source, source_id, session_id, confidence, created_at, updated_at
+		FROM entities WHERE name LIKE ? OR summary LIKE ? OR content LIKE ?
+		ORDER BY confidence DESC LIMIT ?`, "%"+query+"%", "%"+query+"%", "%"+query+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []types.Entity
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		entities = append(entities, e)
+	}
+	if entities == nil {
+		entities = []types.Entity{}
+	}
+	return entities, nil
+}
+
+func scanEntity(rows *sql.Rows) (types.Entity, error) {
+	var e types.Entity
+	var eType, ca, ua string
+	if err := rows.Scan(&e.ID, &e.Name, &eType, &e.Summary, &e.Content, &e.Source, &e.SourceID, &e.SessionID, &e.Confidence, &ca, &ua); err != nil {
+		return e, err
+	}
+	e.EntityType = types.EntityType(eType)
+	e.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ca)
+	e.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", ua)
+	return e, nil
+}
+
+func (db *DB) SaveEntityRelation(r *types.EntityRelation) error {
+	_, err := db.Exec(`INSERT INTO entity_relations (id, source_entity_id, target_entity_id, relation_type, weight, evidence, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(id) DO UPDATE SET
+			relation_type=excluded.relation_type, weight=excluded.weight, evidence=excluded.evidence`,
+		r.ID, r.SourceEntityID, r.TargetEntityID, r.RelationType, r.Weight, r.Evidence)
+	return err
+}
+
+func (db *DB) ListEntityRelations(entityID string) ([]types.EntityRelation, error) {
+	rows, err := db.Query(`SELECT id, source_entity_id, target_entity_id, relation_type, weight, evidence, created_at
+		FROM entity_relations WHERE source_entity_id = ? OR target_entity_id = ? ORDER BY weight DESC`, entityID, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var relations []types.EntityRelation
+	for rows.Next() {
+		var r types.EntityRelation
+		var ca string
+		if err := rows.Scan(&r.ID, &r.SourceEntityID, &r.TargetEntityID, &r.RelationType, &r.Weight, &r.Evidence, &ca); err != nil {
+			return nil, err
+		}
+		r.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ca)
+		relations = append(relations, r)
+	}
+	if relations == nil {
+		relations = []types.EntityRelation{}
+	}
+	return relations, nil
+}
+
+func (db *DB) ListConflicts() ([]types.EntityRelation, error) {
+	rows, err := db.Query(`SELECT id, source_entity_id, target_entity_id, relation_type, weight, evidence, created_at
+		FROM entity_relations WHERE relation_type = 'contradicts' ORDER BY weight DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var relations []types.EntityRelation
+	for rows.Next() {
+		var r types.EntityRelation
+		var ca string
+		if err := rows.Scan(&r.ID, &r.SourceEntityID, &r.TargetEntityID, &r.RelationType, &r.Weight, &r.Evidence, &ca); err != nil {
+			return nil, err
+		}
+		r.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ca)
+		relations = append(relations, r)
+	}
+	if relations == nil {
+		relations = []types.EntityRelation{}
+	}
+	return relations, nil
+}
+
+func (db *DB) SaveSnapshot(s *types.Snapshot) error {
+	eIDs, _ := json.Marshal(s.EntityIDs)
+	_, err := db.Exec(`INSERT INTO snapshots (id, name, description, entity_ids, created_at)
+		VALUES (?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, description=excluded.description, entity_ids=excluded.entity_ids`, s.ID, s.Name, s.Description, string(eIDs))
+	return err
+}
+
+func (db *DB) ListSnapshots() ([]types.Snapshot, error) {
+	rows, err := db.Query(`SELECT id, name, description, entity_ids, created_at FROM snapshots ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var snapshots []types.Snapshot
+	for rows.Next() {
+		var s types.Snapshot
+		var eIDs, ca string
+		if err := rows.Scan(&s.ID, &s.Name, &s.Description, &eIDs, &ca); err != nil {
+			return nil, err
+		}
+		s.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ca)
+		json.Unmarshal([]byte(eIDs), &s.EntityIDs)
+		snapshots = append(snapshots, s)
+	}
+	if snapshots == nil {
+		snapshots = []types.Snapshot{}
+	}
+	return snapshots, nil
+}
+
+func (db *DB) DeleteEntity(id string) error {
+	_, err := db.Exec(`DELETE FROM entities WHERE id = ?`, id)
+	return err
+}
+
 func (db *DB) GetStats() map[string]interface{} {
 	stats := make(map[string]interface{})
 	var v int64
@@ -407,6 +586,8 @@ func (db *DB) GetStats() map[string]interface{} {
 	db.QueryRow(`SELECT COUNT(*) FROM providers`).Scan(&v); stats["total_providers"] = v
 	db.QueryRow(`SELECT COUNT(DISTINCT provider) FROM sessions`).Scan(&v); stats["active_providers"] = v
 	db.QueryRow(`SELECT COALESCE(SUM(token_count), 0) FROM messages`).Scan(&v); stats["total_tokens"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM entities`).Scan(&v); stats["total_entities"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM entity_relations WHERE relation_type = 'contradicts'`).Scan(&v); stats["total_conflicts"] = v
 	return stats
 }
 

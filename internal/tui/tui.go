@@ -65,6 +65,12 @@ type model struct {
 	ctxSelected    int
 	showCtxDetail  bool
 
+	entities       []types.Entity
+	entitySelected int
+	conflicts      []types.EntityRelation
+	snapshots      []types.Snapshot
+	ctxSubMode     int // 0=entries, 1=entities, 2=conflicts, 3=snapshots
+
 	groups []types.AgentGroup
 	providers  []types.Provider
 
@@ -191,7 +197,19 @@ func (m *model) loadAllCmd() tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		return loadedMsg{sessions, entries, groups, providers}
+		entities, err := m.db.ListEntities("", 1000, 0)
+		if err != nil {
+			return errMsg{err}
+		}
+		conflicts, err := m.db.ListConflicts()
+		if err != nil {
+			return errMsg{err}
+		}
+		snapshots, err := m.db.ListSnapshots()
+		if err != nil {
+			return errMsg{err}
+		}
+		return loadedMsg{sessions, entries, entities, conflicts, snapshots, groups, providers}
 	}
 }
 
@@ -202,6 +220,9 @@ type statsMsg struct {
 type loadedMsg struct {
 	sessions  []types.Session
 	entries   []types.ContextEntry
+	entities  []types.Entity
+	conflicts []types.EntityRelation
+	snapshots []types.Snapshot
 	groups    []types.AgentGroup
 	providers []types.Provider
 }
@@ -244,6 +265,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loadedMsg:
 		m.sessions = msg.sessions
 		m.contextEntries = msg.entries
+		m.entities = msg.entities
+		m.conflicts = msg.conflicts
+		m.snapshots = msg.snapshots
 		m.groups = msg.groups
 		m.providers = msg.providers
 
@@ -378,15 +402,30 @@ func (m *model) handleSessionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleContextKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, m.keys.Number1) { m.ctxSubMode = 0; return m, nil }
+	if key.Matches(msg, m.keys.Number2) { m.ctxSubMode = 1; return m, nil }
+	if key.Matches(msg, m.keys.Number3) { m.ctxSubMode = 2; return m, nil }
+	if key.Matches(msg, m.keys.Number4) { m.ctxSubMode = 3; return m, nil }
+
+	switch m.ctxSubMode {
+	case 0:
+		return m.handleCtxEntriesKey(msg)
+	case 1:
+		return m.handleEntityListKey(msg)
+	case 2:
+		return m.handleConflictsKey(msg)
+	case 3:
+		return m.handleSnapshotsKey(msg)
+	}
+	return m, nil
+}
+
+func (m *model) handleCtxEntriesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keys.Up):
-		if m.ctxSelected > 0 {
-			m.ctxSelected--
-		}
+		if m.ctxSelected > 0 { m.ctxSelected-- }
 	case key.Matches(msg, m.keys.Down):
-		if m.ctxSelected < len(m.contextEntries)-1 {
-			m.ctxSelected++
-		}
+		if m.ctxSelected < len(m.contextEntries)-1 { m.ctxSelected++ }
 	case key.Matches(msg, m.keys.Enter):
 		if len(m.contextEntries) > 0 && m.ctxSelected < len(m.contextEntries) {
 			m.showCtxDetail = true
@@ -402,11 +441,38 @@ func (m *model) handleContextKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 	case key.Matches(msg, m.keys.Delete):
 		if len(m.contextEntries) > 0 && m.ctxSelected < len(m.contextEntries) {
-			id := m.contextEntries[m.ctxSelected].ID
-			m.store.Delete(id)
+			m.store.Delete(m.contextEntries[m.ctxSelected].ID)
 			m.statusMsg = "context deleted"
 			return m, tea.Batch(m.loadStatsCmd(), m.loadAllCmd())
 		}
+	case key.Matches(msg, m.keys.Refresh):
+		return m, tea.Batch(m.loadStatsCmd(), m.loadAllCmd())
+	}
+	return m, nil
+}
+
+func (m *model) handleEntityListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Up):
+		if m.entitySelected > 0 { m.entitySelected-- }
+	case key.Matches(msg, m.keys.Down):
+		if m.entitySelected < len(m.entities)-1 { m.entitySelected++ }
+	case key.Matches(msg, m.keys.Refresh):
+		return m, tea.Batch(m.loadStatsCmd(), m.loadAllCmd())
+	}
+	return m, nil
+}
+
+func (m *model) handleConflictsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Refresh):
+		return m, tea.Batch(m.loadStatsCmd(), m.loadAllCmd())
+	}
+	return m, nil
+}
+
+func (m *model) handleSnapshotsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
 	case key.Matches(msg, m.keys.Refresh):
 		return m, tea.Batch(m.loadStatsCmd(), m.loadAllCmd())
 	}
@@ -733,10 +799,36 @@ func (m *model) sessionDetailView() string {
 }
 
 func (m *model) contextView() string {
+	subTabs := []string{"1:Entries", "2:Entities", "3:Conflicts", "4:Snapshots"}
+	var rendered []string
+	for i, label := range subTabs {
+		if i == m.ctxSubMode {
+			rendered = append(rendered, activeTabStyle.Render(label))
+		} else {
+			rendered = append(rendered, tabStyle.Render(label))
+		}
+	}
+	subBar := lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+
+	var body string
+	switch m.ctxSubMode {
+	case 0:
+		body = m.contextEntriesView()
+	case 1:
+		body = m.entityListView()
+	case 2:
+		body = m.conflictsView()
+	case 3:
+		body = m.snapshotsView()
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, subBar, "", body)
+}
+
+func (m *model) contextEntriesView() string {
 	if len(m.contextEntries) == 0 {
 		return lipgloss.JoinVertical(lipgloss.Left,
-			headerStyle.Render(fmt.Sprintf("Context (%d)", len(m.contextEntries))),
-			"",
+			headerStyle.Render("Context Entries (0)"), "",
 			subtleStyle.Render("No context entries. Press 'n' to create one."),
 		)
 	}
@@ -746,17 +838,12 @@ func (m *model) contextView() string {
 		summary := e.Summary
 		if summary == "" {
 			content := e.Content
-			if len(content) > 80 {
-				content = content[:80] + "..."
-			}
+			if len(content) > 80 { content = content[:80] + "..." }
 			summary = content
 		}
 		summary = strings.ReplaceAll(summary, "\n", " ")
 		prefix := "  "
-		if i == m.ctxSelected {
-			prefix = "▸ "
-		}
-
+		if i == m.ctxSelected { prefix = "▸ " }
 		entry := fmt.Sprintf("%s%s [%s] %s", prefix, e.ID[:8], e.Source, summary)
 		if i == m.ctxSelected {
 			items = append(items, selectedItemStyle.Render(entry))
@@ -766,11 +853,84 @@ func (m *model) contextView() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		headerStyle.Render(fmt.Sprintf("Context (%d)", len(m.contextEntries))),
-		"",
-		strings.Join(items, "\n"),
-		"",
+		headerStyle.Render(fmt.Sprintf("Context Entries (%d)", len(m.contextEntries))), "",
+		strings.Join(items, "\n"), "",
 		subtleStyle.Render("↑/↓ navigate · enter view · n new · d delete · r refresh"),
+	)
+}
+
+func (m *model) entityListView() string {
+	if len(m.entities) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			headerStyle.Render("Entities (0)"), "",
+			subtleStyle.Render("No entities. Run 'agent-sync context extract' to extract them."),
+		)
+	}
+
+	var items []string
+	for i, e := range m.entities {
+		summary := e.Summary
+		if len(summary) > 70 { summary = summary[:70] + "..." }
+		summary = strings.ReplaceAll(summary, "\n", " ")
+		eType := yellowStyle.Render(string(e.EntityType))
+		prefix := "  "
+		if i == m.entitySelected { prefix = "▸ " }
+		entry := fmt.Sprintf("%s%s [%s] %s (%.0f%%)", prefix, e.ID[:8], eType, summary, e.Confidence*100)
+		if i == m.entitySelected {
+			items = append(items, selectedItemStyle.Render(entry))
+		} else {
+			items = append(items, entry)
+		}
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		headerStyle.Render(fmt.Sprintf("Entities (%d)", len(m.entities))), "",
+		strings.Join(items, "\n"), "",
+		subtleStyle.Render("↑/↓ navigate · r refresh"),
+	)
+}
+
+func (m *model) conflictsView() string {
+	if len(m.conflicts) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			headerStyle.Render("Conflicts (0)"), "",
+			subtleStyle.Render("No conflicts detected."),
+		)
+	}
+
+	var items []string
+	for _, c := range m.conflicts {
+		items = append(items, fmt.Sprintf("  %s %s", redStyle.Render("✗"), c.Evidence))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		headerStyle.Render(fmt.Sprintf("Conflicts (%d)", len(m.conflicts))), "",
+		strings.Join(items, "\n"), "",
+		subtleStyle.Render("r refresh"),
+	)
+}
+
+func (m *model) snapshotsView() string {
+	if len(m.snapshots) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			headerStyle.Render("Snapshots (0)"), "",
+			subtleStyle.Render("No snapshots. Use CLI: agent-sync snapshot create"),
+		)
+	}
+
+	var items []string
+	for _, s := range m.snapshots {
+		items = append(items, fmt.Sprintf("  %s %s — %d entities",
+			s.ID[:8], accentStyle.Render(s.Name), len(s.EntityIDs)))
+		if s.Description != "" {
+			items = append(items, fmt.Sprintf("    %s", subtleStyle.Render(s.Description)))
+		}
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		headerStyle.Render(fmt.Sprintf("Snapshots (%d)", len(m.snapshots))), "",
+		strings.Join(items, "\n"), "",
+		subtleStyle.Render("r refresh"),
 	)
 }
 

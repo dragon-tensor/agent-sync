@@ -101,3 +101,45 @@ type SyncStats struct {
 	MessagesNew   int    `json:"messages_new"`
 	Errors        int    `json:"errors"`
 }
+
+type EntityType string
+
+const (
+	EntityDecision EntityType = "decision"
+	EntityFact     EntityType = "fact"
+	EntityCode     EntityType = "code_pattern"
+	EntityPreference EntityType = "preference"
+	EntityGoal     EntityType = "goal"
+)
+
+type Entity struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	EntityType EntityType `json:"entity_type"`
+	Summary    string     `json:"summary"`
+	Content    string     `json:"content"`
+	Source     string     `json:"source"`
+	SourceID   string     `json:"source_id,omitempty"`
+	SessionID  string     `json:"session_id,omitempty"`
+	Confidence float64    `json:"confidence"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+type EntityRelation struct {
+	ID             string    `json:"id"`
+	SourceEntityID string    `json:"source_entity_id"`
+	TargetEntityID string    `json:"target_entity_id"`
+	RelationType   string    `json:"relation_type"`
+	Weight         float64   `json:"weight"`
+	Evidence       string    `json:"evidence,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type Snapshot struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	EntityIDs   []string  `json:"entity_ids"`
+	CreatedAt   time.Time `json:"created_at"`
+}

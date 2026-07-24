@@ -146,6 +146,25 @@ func (s *MCPServer) handleRequest(req MCPRequest) MCPResponse {
 							"properties": map[string]interface{}{},
 						},
 					},
+					{
+						Name:        "list_entities",
+						Description: "List extracted entities, optionally filtered by type",
+						InputSchema: map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"type":  map[string]interface{}{"type": "string", "description": "Entity type filter (decision|fact|code_pattern|preference|goal)"},
+								"limit": map[string]interface{}{"type": "number", "description": "Max results"},
+							},
+						},
+					},
+					{
+						Name:        "list_conflicts",
+						Description: "List detected entity conflicts",
+						InputSchema: map[string]interface{}{
+							"type":       "object",
+							"properties": map[string]interface{}{},
+						},
+					},
 				},
 			},
 		}
@@ -277,6 +296,42 @@ func (s *MCPServer) handleToolCall(req MCPRequest) MCPResponse {
 			Result:  stats,
 		}
 
+	case "list_entities":
+		var args struct {
+			Type  string `json:"type"`
+			Limit int    `json:"limit"`
+		}
+		json.Unmarshal(params.Arguments, &args)
+		if args.Limit <= 0 {
+			args.Limit = 50
+		}
+		entities, err := s.db.ListEntities(args.Type, args.Limit, 0)
+		if err != nil {
+			return errorResponse(req.ID, -32603, err.Error())
+		}
+		return MCPResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"entities": entities,
+				"count":    len(entities),
+			},
+		}
+
+	case "list_conflicts":
+		conflicts, err := s.db.ListConflicts()
+		if err != nil {
+			return errorResponse(req.ID, -32603, err.Error())
+		}
+		return MCPResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]interface{}{
+				"conflicts": conflicts,
+				"count":     len(conflicts),
+			},
+		}
+
 	default:
 		return errorResponse(req.ID, -32601, fmt.Sprintf("Tool not found: %s", params.Name))
 	}
@@ -345,7 +400,7 @@ func (s *MCPServer) RunHTTP(address string) error {
 }
 
 func (s *MCPServer) HasTool(name string) bool {
-	toolNames := []string{"save_context", "recall_context", "search_sessions", "list_sessions", "get_stats"}
+	toolNames := []string{"save_context", "recall_context", "search_sessions", "list_sessions", "get_stats", "list_entities", "list_conflicts"}
 	for _, t := range toolNames {
 		if t == name {
 			return true
@@ -361,6 +416,8 @@ func (s *MCPServer) GetTools() []MCPTool {
 		{Name: "search_sessions", Description: "Search past sessions"},
 		{Name: "list_sessions", Description: "List recent sessions"},
 		{Name: "get_stats", Description: "Get statistics"},
+		{Name: "list_entities", Description: "List extracted entities"},
+		{Name: "list_conflicts", Description: "List entity conflicts"},
 	}
 }
 
@@ -438,6 +495,26 @@ func (s *MCPServer) ProcessToolCall(name string, args map[string]interface{}) (i
 
 	case "get_stats":
 		return s.db.GetStats(), nil
+	case "list_entities":
+		eType, _ := args["type"].(string)
+		limit, _ := args["limit"].(float64)
+		entities, err := s.db.ListEntities(eType, int(limit), 0)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"entities": entities,
+			"count":    len(entities),
+		}, nil
+	case "list_conflicts":
+		conflicts, err := s.db.ListConflicts()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"conflicts": conflicts,
+			"count":     len(conflicts),
+		}, nil
 	}
 
 	return nil, fmt.Errorf("tool not found: %s", name)
