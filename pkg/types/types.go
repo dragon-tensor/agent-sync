@@ -11,6 +11,9 @@ const (
 	ProviderCodex      ProviderType = "codex"
 	ProviderChatGPT    ProviderType = "chatgpt"
 	ProviderClaudeWeb  ProviderType = "claude-web"
+	ProviderGemini     ProviderType = "gemini"
+	ProviderCopilot    ProviderType = "copilot"
+	ProviderGeneric    ProviderType = "generic"
 )
 
 type Session struct {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,9 +15,11 @@ import (
 	"github.com/agent-sync/agent-sync/internal/api"
 	"github.com/agent-sync/agent-sync/internal/config"
 	"github.com/agent-sync/agent-sync/internal/context"
+	"github.com/agent-sync/agent-sync/internal/daemon"
 	"github.com/agent-sync/agent-sync/internal/db"
 	"github.com/agent-sync/agent-sync/internal/groups"
 	mcp2 "github.com/agent-sync/agent-sync/internal/mcp"
+	"github.com/agent-sync/agent-sync/internal/plugins"
 	"github.com/agent-sync/agent-sync/internal/sync"
 	"github.com/agent-sync/agent-sync/internal/sync/providers"
 	"github.com/agent-sync/agent-sync/internal/tui"
@@ -24,6 +27,10 @@ import (
 )
 
 var (
+	version  = "0.1.0-dev"
+	commit   = "unknown"
+	date     = "unknown"
+
 	cfg    *config.Config
 	dbase  *db.DB
 	reg    *sync.Registry
@@ -33,6 +40,7 @@ var (
 	groupsMgr *groups.Manager
 	mcpSrv *mcp2.MCPServer
 	apiSrv *api.Server
+	pluginReg *plugins.PluginRegistry
 )
 
 func main() {
@@ -69,6 +77,9 @@ func main() {
 	mcpSrv = mcp2.NewServer(dbase, store)
 	apiSrv = api.NewServer(dbase, reg, store, merge, groupsMgr, cfg)
 
+	pluginReg = plugins.NewRegistry(plugins.DefaultPluginDir())
+	pluginReg.ScanDir()
+
 	root := buildRootCmd()
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -103,6 +114,15 @@ sessions, and lets you manage everything via CLI, MCP, or web GUI.`,
 	root.AddCommand(buildDetectCmd())
 	root.AddCommand(buildTUICmd())
 	root.AddCommand(buildSnapshotCmd())
+	root.AddCommand(buildPluginCmd())
+	root.AddCommand(buildDaemonCmd())
+	root.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("agent-sync %s (commit: %s, built: %s)\n", version, commit, date)
+		},
+	})
 
 	return root
 }
@@ -1095,4 +1115,164 @@ func runExtraction(source string) (int, int) {
 	_, _ = graph.BuildGraph()
 	conflicts, _ := dbase.ListConflicts()
 	return total, len(conflicts)
+}
+
+func buildPluginCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "plugin",
+		Short: "Manage agent-sync plugins",
+		Long:  plugins.PluginCLIDescription(),
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List installed plugins",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(plugins.PluginListCommand(pluginReg))
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "install <path>",
+		Short: "Install a plugin from an executable path",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			manifest, err := pluginReg.Install(args[0])
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				return
+			}
+			fmt.Printf("Installed plugin: %s (%s)\n", manifest.Name, manifest.Type)
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "probe <path>",
+		Short: "Probe an executable to check if it's a valid plugin",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			manifest := plugins.ProbePlugin(args[0])
+			if manifest == nil {
+				fmt.Println("Not a valid agent-sync plugin")
+				return
+			}
+			data, _ := json.MarshalIndent(manifest, "", "  ")
+			fmt.Println(string(data))
+		},
+	})
+
+	return cmd
+}
+
+func buildDaemonCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "daemon",
+		Short: "Run agent-sync as a background service",
+		Long: `Run agent-sync in daemon mode for automatic background sync.
+
+Starts a background service that periodically syncs all detected providers.
+Supports file watching for instant sync on new chat files.
+
+Subcommands:
+  run           Start the daemon (foreground)
+  install       Install as a system service (systemd/launchd/cron)
+  uninstall     Remove the installed service
+
+Examples:
+  agent-sync daemon run --interval 15m
+  agent-sync daemon install --systemd
+  agent-sync daemon install --launchd
+  agent-sync daemon install --cron`,
+	}
+
+	runCmd := &cobra.Command{
+		Use:   "run",
+		Short: "Start the daemon (foreground)",
+		Run: func(cmd *cobra.Command, args []string) {
+			interval, _ := cmd.Flags().GetDuration("interval")
+			if interval <= 0 {
+				interval = daemon.DefaultInterval()
+			}
+			watchDirs, _ := cmd.Flags().GetStringSlice("watch")
+
+			svc := daemon.New(reg, dbase,
+				daemon.WithInterval(interval),
+				daemon.WithWatchPaths(watchDirs),
+				daemon.WithSyncCallback(func(provider string, stats *types.SyncStats) {
+					fmt.Printf("[%s] Synced %s: %d sessions, %d new messages\n",
+						time.Now().Format("15:04:05"), provider, stats.SessionsFound, stats.MessagesNew)
+				}),
+				daemon.WithErrorCallback(func(err error) {
+					fmt.Fprintf(os.Stderr, "[%s] Error: %v\n", time.Now().Format("15:04:05"), err)
+				}),
+			)
+			svc.Start()
+			fmt.Println("Daemon started. Press Ctrl+C to stop.")
+			<-make(chan struct{})
+		},
+	}
+	runCmd.Flags().Duration("interval", daemon.DefaultInterval(), "Sync interval (e.g. 15m, 1h)")
+	runCmd.Flags().StringSlice("watch", nil, "Directories to watch for new chat files")
+	cmd.AddCommand(runCmd)
+
+	installCmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install as a system service",
+		Run: func(cmd *cobra.Command, args []string) {
+			binPath, _ := cmd.Flags().GetString("bin")
+			if binPath == "" {
+				binPath, _ = os.Executable()
+			}
+			dataDir := cfg.DataDir
+
+			switch {
+			case cmd.Flags().Changed("systemd"):
+				svc := daemon.WriteSystemdService(binPath, dataDir)
+				os.WriteFile("/etc/systemd/system/agent-sync.service", []byte(svc), 0644)
+				fmt.Println("Systemd service written to /etc/systemd/system/agent-sync.service")
+				fmt.Println("Run: sudo systemctl daemon-reload && sudo systemctl enable --now agent-sync")
+
+			case cmd.Flags().Changed("launchd"):
+				label := "com.agent-sync.daemon"
+				plist := daemon.WriteLaunchdPlist(binPath, dataDir, label)
+				home, _ := os.UserHomeDir()
+				dst := filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+				os.MkdirAll(filepath.Dir(dst), 0755)
+				os.WriteFile(dst, []byte(plist), 0644)
+				fmt.Printf("Launchd plist written to %s\n", dst)
+				fmt.Println("Run: launchctl load " + dst)
+
+			case cmd.Flags().Changed("cron"):
+				cronExpr, _ := cmd.Flags().GetString("cron-expr")
+				if cronExpr == "" {
+					cronExpr = "*/30 * * * *"
+				}
+				cron := daemon.WriteCrontab(binPath, cronExpr)
+				fmt.Println("Add the following to your crontab (crontab -e):")
+				fmt.Println(cron)
+
+			default:
+				fmt.Println("Specify --systemd, --launchd, or --cron")
+			}
+		},
+	}
+	installCmd.Flags().String("bin", "", "Path to agent-sync binary (default: auto-detect)")
+	installCmd.Flags().Bool("systemd", false, "Install as systemd service")
+	installCmd.Flags().Bool("launchd", false, "Install as macOS launchd service")
+	installCmd.Flags().Bool("cron", false, "Install as crontab entry")
+	installCmd.Flags().String("cron-expr", "*/30 * * * *", "Cron schedule expression")
+	cmd.AddCommand(installCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove the installed service",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("Manual removal required:")
+			fmt.Println("  systemd: sudo systemctl stop agent-sync && sudo rm /etc/systemd/system/agent-sync.service")
+			fmt.Println("  launchd: launchctl unload ~/Library/LaunchAgents/com.agent-sync.daemon.plist && rm ~/Library/LaunchAgents/com.agent-sync.daemon.plist")
+			fmt.Println("  cron: crontab -e and remove the agent-sync line")
+		},
+	})
+
+	return cmd
 }

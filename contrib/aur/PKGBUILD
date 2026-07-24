@@ -1,0 +1,24 @@
+# Maintainer: agent-sync <bot@agent-sync.github>
+pkgname=agent-sync
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Sync AI chat histories, extract context, build knowledge graphs, and hand off coherent snapshots between tools"
+arch=('x86_64' 'aarch64')
+url="https://github.com/agent-sync/agent-sync"
+license=('MIT')
+depends=('glibc')
+makedepends=('go')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/agent-sync/agent-sync/archive/v$pkgver.tar.gz")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  go build -o agent-sync ./cmd/agent-sync
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  install -Dm755 agent-sync "$pkgdir/usr/bin/agent-sync"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

@@ -72,6 +72,24 @@ func (r *Registry) InitDefaultProviders(cfg providers.Config) {
 		{types.ProviderCursor, func(cfg providers.Config) (Provider, error) {
 			return providers.NewCursorProvider(cfg, r.db)
 		}},
+		{types.ProviderChatGPT, func(cfg providers.Config) (Provider, error) {
+			return providers.NewChatGPTProvider(cfg, r.db)
+		}},
+		{types.ProviderClaudeWeb, func(cfg providers.Config) (Provider, error) {
+			return providers.NewClaudeWebProvider(cfg, r.db)
+		}},
+		{types.ProviderGemini, func(cfg providers.Config) (Provider, error) {
+			return providers.NewGeminiProvider(cfg, r.db)
+		}},
+		{types.ProviderCopilot, func(cfg providers.Config) (Provider, error) {
+			return providers.NewCopilotProvider(cfg, r.db)
+		}},
+		{types.ProviderCodex, func(cfg providers.Config) (Provider, error) {
+			return providers.NewCodexProvider(cfg, r.db)
+		}},
+		{types.ProviderGeneric, func(cfg providers.Config) (Provider, error) {
+			return providers.NewGenericProvider(cfg, r.db)
+		}},
 	}
 
 	for _, p := range providersList {
