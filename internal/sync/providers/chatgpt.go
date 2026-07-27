@@ -94,7 +94,7 @@ func (p *ChatGPTProvider) Detect() (bool, error) {
 }
 
 func (p *ChatGPTProvider) getProvider() (*types.Provider, error) {
-	prov, err := p.db.GetProvider(string(p.Type()))
+	prov, err := p.db.GetProviderByType(string(p.Type()))
 	if err != nil {
 		prov = &types.Provider{
 			ID:        db.NewID(),

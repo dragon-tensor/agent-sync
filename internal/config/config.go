@@ -8,11 +8,8 @@ import (
 )
 
 type Config struct {
-	DBPath    string `json:"db_path"`
-	DataDir   string `json:"data_dir"`
-	APIPort   int    `json:"api_port"`
-	MCPPort   int    `json:"mcp_port"`
-	MCPServer string `json:"mcp_server_type"`
+	DBPath  string `json:"db_path"`
+	DataDir string `json:"data_dir"`
 
 	defaultPaths map[string]string `json:"-"`
 }
@@ -22,11 +19,8 @@ func DefaultConfig() *Config {
 	dataDir := filepath.Join(home, ".agent-sync")
 
 	return &Config{
-		DBPath:    filepath.Join(dataDir, "agent-sync.db"),
-		DataDir:   dataDir,
-		APIPort:   9688,
-		MCPPort:   9689,
-		MCPServer: "stdio",
+		DBPath:  filepath.Join(dataDir, "agent-sync.db"),
+		DataDir: dataDir,
 		defaultPaths: map[string]string{
 			"claude-code": filepath.Join(home, ".claude", "projects"),
 			"opencode":    filepath.Join(home, ".local", "share", "opencode"),

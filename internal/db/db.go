@@ -36,8 +36,12 @@ func Open(path string) (*DB, error) {
 }
 
 func (db *DB) migrate() error {
-	_, err := db.Exec(SchemaSQL)
-	return err
+	if _, err := db.Exec(SchemaSQL); err != nil {
+		return err
+	}
+	db.Exec(`DELETE FROM providers WHERE rowid NOT IN (SELECT MIN(rowid) FROM providers GROUP BY type)`)
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_providers_type ON providers(type)`)
+	return nil
 }
 
 func (db *DB) UpsertProvider(p *types.Provider) error {
@@ -90,6 +94,29 @@ func (db *DB) GetProvider(id string) (*types.Provider, error) {
 	var enabled int
 	var lastSync, ca, ua sql.NullString
 	err := db.QueryRow(`SELECT id, name, type, path, config, enabled, last_sync, created_at, updated_at FROM providers WHERE id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.Type, &p.Path, &p.Config, &enabled, &lastSync, &ca, &ua)
+	if err != nil {
+		return nil, err
+	}
+	p.Enabled = enabled > 0
+	if lastSync.Valid {
+		t, _ := time.Parse("2006-01-02 15:04:05", lastSync.String)
+		p.LastSync = &t
+	}
+	if ca.Valid {
+		p.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ca.String)
+	}
+	if ua.Valid {
+		p.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", ua.String)
+	}
+	return &p, nil
+}
+
+func (db *DB) GetProviderByType(pt string) (*types.Provider, error) {
+	var p types.Provider
+	var enabled int
+	var lastSync, ca, ua sql.NullString
+	err := db.QueryRow(`SELECT id, name, type, path, config, enabled, last_sync, created_at, updated_at FROM providers WHERE type = ? ORDER BY created_at DESC LIMIT 1`, pt).
 		Scan(&p.ID, &p.Name, &p.Type, &p.Path, &p.Config, &enabled, &lastSync, &ca, &ua)
 	if err != nil {
 		return nil, err
@@ -170,11 +197,14 @@ func (db *DB) ListSessions(provider string, limit, offset int) ([]types.Session,
 
 func (db *DB) GetSession(id string) (*types.Session, error) {
 	var s types.Session
-	var endedAt, ca, ua sql.NullString
+	var startedAt, endedAt, ca, ua sql.NullString
 	err := db.QueryRow(`SELECT id, provider_id, provider, title, model, workspace, project_dir, started_at, ended_at, token_count, message_count, metadata, created_at, updated_at FROM sessions WHERE id = ?`, id).
-		Scan(&s.ID, &s.ProviderID, &s.Provider, &s.Title, &s.Model, &s.Workspace, &s.ProjectDir, &s.StartedAt, &endedAt, &s.TokenCount, &s.MessageCount, &s.Metadata, &ca, &ua)
+		Scan(&s.ID, &s.ProviderID, &s.Provider, &s.Title, &s.Model, &s.Workspace, &s.ProjectDir, &startedAt, &endedAt, &s.TokenCount, &s.MessageCount, &s.Metadata, &ca, &ua)
 	if err != nil {
 		return nil, err
+	}
+	if startedAt.Valid {
+		s.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAt.String)
 	}
 	if endedAt.Valid {
 		t, _ := time.Parse("2006-01-02 15:04:05", endedAt.String)
@@ -276,9 +306,12 @@ func scanContextEntry(rows *sql.Rows) (types.ContextEntry, error) {
 
 func scanSession(rows *sql.Rows) (types.Session, error) {
 	var s types.Session
-	var endedAt, ca, ua sql.NullString
-	if err := rows.Scan(&s.ID, &s.ProviderID, &s.Provider, &s.Title, &s.Model, &s.Workspace, &s.ProjectDir, &s.StartedAt, &endedAt, &s.TokenCount, &s.MessageCount, &s.Metadata, &ca, &ua); err != nil {
+	var startedAt, endedAt, ca, ua sql.NullString
+	if err := rows.Scan(&s.ID, &s.ProviderID, &s.Provider, &s.Title, &s.Model, &s.Workspace, &s.ProjectDir, &startedAt, &endedAt, &s.TokenCount, &s.MessageCount, &s.Metadata, &ca, &ua); err != nil {
 		return s, err
+	}
+	if startedAt.Valid {
+		s.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAt.String)
 	}
 	if endedAt.Valid {
 		t, _ := time.Parse("2006-01-02 15:04:05", endedAt.String)
@@ -336,51 +369,6 @@ func (db *DB) ListContextEntries(limit, offset int) ([]types.ContextEntry, error
 
 func (db *DB) DeleteContextEntry(id string) error {
 	_, err := db.Exec(`DELETE FROM context_entries WHERE id = ?`, id)
-	return err
-}
-
-func (db *DB) SaveAgentGroup(g *types.AgentGroup) error {
-	pIDs, _ := json.Marshal(g.ProviderIDs)
-	cIDs, _ := json.Marshal(g.ContextIDs)
-	_, err := db.Exec(`INSERT INTO agent_groups (id, name, description, provider_ids, context_ids, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			name=excluded.name, description=excluded.description,
-			provider_ids=excluded.provider_ids, context_ids=excluded.context_ids,
-			updated_at=excluded.updated_at`,
-		g.ID, g.Name, g.Description, string(pIDs), string(cIDs),
-		g.CreatedAt.Format("2006-01-02 15:04:05"), g.UpdatedAt.Format("2006-01-02 15:04:05"))
-	return err
-}
-
-func (db *DB) ListAgentGroups() ([]types.AgentGroup, error) {
-	rows, err := db.Query(`SELECT id, name, description, provider_ids, context_ids, created_at, updated_at FROM agent_groups ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var groups []types.AgentGroup
-	for rows.Next() {
-		var g types.AgentGroup
-		var pIDs, cIDs, ca, ua string
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &pIDs, &cIDs, &ca, &ua); err != nil {
-			return nil, err
-		}
-		g.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ca)
-		g.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", ua)
-		json.Unmarshal([]byte(pIDs), &g.ProviderIDs)
-		json.Unmarshal([]byte(cIDs), &g.ContextIDs)
-		groups = append(groups, g)
-	}
-	if groups == nil {
-		groups = []types.AgentGroup{}
-	}
-	return groups, nil
-}
-
-func (db *DB) DeleteAgentGroup(id string) error {
-	_, err := db.Exec(`DELETE FROM agent_groups WHERE id = ?`, id)
 	return err
 }
 
@@ -630,14 +618,22 @@ func (db *DB) DeleteEntity(id string) error {
 func (db *DB) GetStats() map[string]interface{} {
 	stats := make(map[string]interface{})
 	var v int64
-	db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&v); stats["total_sessions"] = v
-	db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&v); stats["total_messages"] = v
-	db.QueryRow(`SELECT COUNT(*) FROM context_entries`).Scan(&v); stats["total_context_entries"] = v
-	db.QueryRow(`SELECT COUNT(*) FROM providers`).Scan(&v); stats["total_providers"] = v
-	db.QueryRow(`SELECT COUNT(DISTINCT provider) FROM sessions`).Scan(&v); stats["active_providers"] = v
-	db.QueryRow(`SELECT COALESCE(SUM(token_count), 0) FROM messages`).Scan(&v); stats["total_tokens"] = v
-	db.QueryRow(`SELECT COUNT(*) FROM entities`).Scan(&v); stats["total_entities"] = v
-	db.QueryRow(`SELECT COUNT(*) FROM entity_relations WHERE relation_type = 'contradicts'`).Scan(&v); stats["total_conflicts"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&v)
+	stats["total_sessions"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&v)
+	stats["total_messages"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM context_entries`).Scan(&v)
+	stats["total_context_entries"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM providers`).Scan(&v)
+	stats["total_providers"] = v
+	db.QueryRow(`SELECT COUNT(DISTINCT provider) FROM sessions`).Scan(&v)
+	stats["active_providers"] = v
+	db.QueryRow(`SELECT COALESCE(SUM(token_count), 0) FROM messages`).Scan(&v)
+	stats["total_tokens"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM entities`).Scan(&v)
+	stats["total_entities"] = v
+	db.QueryRow(`SELECT COUNT(*) FROM entity_relations WHERE relation_type = 'contradicts'`).Scan(&v)
+	stats["total_conflicts"] = v
 	return stats
 }
 

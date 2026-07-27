@@ -17,32 +17,32 @@ const (
 )
 
 type Session struct {
-	ID         string       `json:"id"`
-	ProviderID string       `json:"provider_id"`
-	Provider   ProviderType `json:"provider"`
-	Title      string       `json:"title"`
-	Model      string       `json:"model"`
-	Workspace  string       `json:"workspace"`
-	ProjectDir string       `json:"project_dir"`
-	StartedAt  time.Time    `json:"started_at"`
-	EndedAt    *time.Time   `json:"ended_at,omitempty"`
-	TokenCount int          `json:"token_count"`
-	MessageCount int        `json:"message_count"`
-	Metadata   string       `json:"metadata,omitempty"`
-	CreatedAt  time.Time    `json:"created_at"`
-	UpdatedAt  time.Time    `json:"updated_at"`
+	ID           string       `json:"id"`
+	ProviderID   string       `json:"provider_id"`
+	Provider     ProviderType `json:"provider"`
+	Title        string       `json:"title"`
+	Model        string       `json:"model"`
+	Workspace    string       `json:"workspace"`
+	ProjectDir   string       `json:"project_dir"`
+	StartedAt    time.Time    `json:"started_at"`
+	EndedAt      *time.Time   `json:"ended_at,omitempty"`
+	TokenCount   int          `json:"token_count"`
+	MessageCount int          `json:"message_count"`
+	Metadata     string       `json:"metadata,omitempty"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
 type Message struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"session_id"`
-	ParentID  *string   `json:"parent_id,omitempty"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	TokenCount int      `json:"token_count"`
-	ToolCalls string    `json:"tool_calls,omitempty"`
-	Metadata  string    `json:"metadata,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	SessionID  string    `json:"session_id"`
+	ParentID   *string   `json:"parent_id,omitempty"`
+	Role       string    `json:"role"`
+	Content    string    `json:"content"`
+	TokenCount int       `json:"token_count"`
+	ToolCalls  string    `json:"tool_calls,omitempty"`
+	Metadata   string    `json:"metadata,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type ContextEntry struct {
@@ -52,7 +52,6 @@ type ContextEntry struct {
 	Source    string    `json:"source"`
 	SourceID  string    `json:"source_id,omitempty"`
 	Tags      []string  `json:"tags,omitempty"`
-	GroupIDs  []string  `json:"group_ids,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -64,16 +63,6 @@ type ContextMerge struct {
 	ResultID  string    `json:"result_id"`
 	Strategy  string    `json:"strategy"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-type AgentGroup struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	ProviderIDs []string `json:"provider_ids"`
-	ContextIDs  []string `json:"context_ids,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Provider struct {
@@ -108,11 +97,11 @@ type SyncStats struct {
 type EntityType string
 
 const (
-	EntityDecision EntityType = "decision"
-	EntityFact     EntityType = "fact"
-	EntityCode     EntityType = "code_pattern"
+	EntityDecision   EntityType = "decision"
+	EntityFact       EntityType = "fact"
+	EntityCode       EntityType = "code_pattern"
 	EntityPreference EntityType = "preference"
-	EntityGoal     EntityType = "goal"
+	EntityGoal       EntityType = "goal"
 )
 
 type Entity struct {
