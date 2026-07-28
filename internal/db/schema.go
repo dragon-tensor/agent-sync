@@ -116,6 +116,56 @@ CREATE TABLE IF NOT EXISTS config (
     value TEXT NOT NULL
 );
 
+-- Dragon Sync owns these tables.  They are intentionally separate from the
+-- legacy imported provider sessions above: a chat is the canonical private
+-- ledger, while every agent has an independent resumable native session.
+CREATE TABLE IF NOT EXISTS chats (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    project_dir TEXT NOT NULL DEFAULT '',
+    active_agent TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS chat_agent_sessions (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    agent TEXT NOT NULL,
+    native_session_id TEXT NOT NULL DEFAULT '',
+    last_delivered_sequence INTEGER NOT NULL DEFAULT 0,
+    last_active_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(chat_id, agent)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_agent_sessions_chat ON chat_agent_sessions(chat_id);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    agent TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(chat_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_sequence ON chat_messages(chat_id, sequence);
+
+CREATE TABLE IF NOT EXISTS chat_handoffs (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    target_agent TEXT NOT NULL,
+    from_sequence INTEGER NOT NULL,
+    to_sequence INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_handoffs_chat ON chat_handoffs(chat_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content, tokenize='porter'
 );

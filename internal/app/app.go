@@ -3,17 +3,32 @@ package app
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/agent-sync/agent-sync/internal/chat"
+	"github.com/agent-sync/agent-sync/internal/config"
+	"github.com/agent-sync/agent-sync/internal/db"
 	"github.com/agent-sync/agent-sync/internal/tui"
 )
 
 const version = "0.1.0-dev"
 
-// Run starts the Dragon Sync terminal surface. Product actions will be wired
-// into this boundary after the visual shell is approved.
+// Run starts the local Dragon Sync workspace and its terminal surface.
 func Run() error {
-	program := tui.NewProgram()
-	_, err := program.Run()
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0755); err != nil {
+		return fmt.Errorf("create data directory: %w", err)
+	}
+	database, err := db.Open(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	program := tui.NewProgram(chat.NewService(database, nil))
+	_, err = program.Run()
 	return err
 }
 
