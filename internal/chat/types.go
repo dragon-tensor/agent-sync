@@ -39,6 +39,20 @@ type AgentSession struct {
 	LastActiveAt          *time.Time
 }
 
+// AgentMetrics is deliberately a common, optional view. Different CLIs expose
+// different fields, so a zero value means that provider did not report it.
+type AgentMetrics struct {
+	ChatID        string
+	Agent         Agent
+	Model         string
+	Effort        string
+	InputTokens   int
+	OutputTokens  int
+	ContextWindow int
+	CostUSD       float64
+	UpdatedAt     time.Time
+}
+
 type Handoff struct {
 	Target Agent
 	From   int

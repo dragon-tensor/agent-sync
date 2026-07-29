@@ -19,7 +19,7 @@ type Service struct {
 
 func NewService(database *db.DB, runner Runner) *Service {
 	if runner == nil {
-		runner = CommandRunner{}
+		runner = NewBackgroundRunner(CommandRunner{})
 	}
 	return &Service{store: NewStore(database), database: database, runner: runner}
 }
@@ -37,16 +37,23 @@ func (s *Service) Messages(chatID string) ([]Message, error) { return s.store.Me
 func (s *Service) AgentSessions(chatID string) ([]AgentSession, error) {
 	return s.store.ListAgentSessions(chatID)
 }
+func (s *Service) AgentMetrics(chatID string) ([]AgentMetrics, error) { return s.store.Metrics(chatID) }
 
 func (s *Service) Switch(chatID string, agent Agent) (*Chat, error) {
 	if !isKnownAgent(agent) {
 		return nil, fmt.Errorf("unknown agent %q", agent)
 	}
-	if _, err := s.store.Get(chatID); err != nil {
+	conversation, err := s.store.Get(chatID)
+	if err != nil {
 		return nil, err
 	}
 	if err := s.store.SetActiveAgent(chatID, agent); err != nil {
 		return nil, err
+	}
+	if conversation.ActiveAgent != agent {
+		if _, err := s.store.AddMessage(chatID, "system", agentBanner(agent), agent); err != nil {
+			return nil, err
+		}
 	}
 	return s.store.Get(chatID)
 }
@@ -112,7 +119,7 @@ func (s *Service) Send(ctx context.Context, chatID, input string) (*Message, err
 	// Read the target session's unseen messages before recording the new user
 	// message.  This gives a resumed agent exactly the work done elsewhere,
 	// then presents the current user instruction as the active request.
-	transfer, err := s.store.MessagesAfter(chat.ID, session.LastDeliveredSequence)
+	transfer, err := s.store.TransferMessagesAfter(chat.ID, session.LastDeliveredSequence)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +128,7 @@ func (s *Service) Send(ctx context.Context, chatID, input string) (*Message, err
 	}
 
 	prompt := buildPrompt(chat.ActiveAgent, transfer, input)
-	result, err := s.runner.Run(ctx, RunRequest{Agent: chat.ActiveAgent, ProjectDir: chat.ProjectDir, Prompt: prompt, NativeSessionID: session.NativeSessionID})
+	result, err := s.runner.Run(ctx, RunRequest{ChatID: chat.ID, Agent: chat.ActiveAgent, ProjectDir: chat.ProjectDir, Prompt: prompt, NativeSessionID: session.NativeSessionID})
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +144,10 @@ func (s *Service) Send(ctx context.Context, chatID, input string) (*Message, err
 	}
 	if result.NativeSessionID != "" {
 		session.NativeSessionID = result.NativeSessionID
+	}
+	result.Metrics.ChatID, result.Metrics.Agent = chat.ID, chat.ActiveAgent
+	if err := s.store.SaveMetrics(result.Metrics); err != nil {
+		return nil, err
 	}
 	session.LastDeliveredSequence = reply.Sequence
 	if err := s.store.UpdateAgentSession(session); err != nil {
@@ -182,6 +193,12 @@ func importedAgent(provider types.ProviderType, fallback Agent) Agent {
 	default:
 		return fallback
 	}
+}
+
+func agentBanner(agent Agent) string {
+	name := strings.ToUpper(string(agent))
+	line := strings.Repeat("=", len(name)+16)
+	return "+" + line + "+\n|      ACTIVE AGENT: " + name + "      |\n+" + line + "+"
 }
 
 func isAvailable(agent Agent) bool {

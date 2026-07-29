@@ -88,3 +88,42 @@ func TestConsecutiveMessagesDoNotCreateHandoff(t *testing.T) {
 		t.Fatalf("got prompt %q, want direct second message", got)
 	}
 }
+
+func TestSwitchAddsVisibleBannerButDoesNotTransferIt(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "dragon-sync.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	runner := &recordedRunner{}
+	service := NewService(database, runner)
+	conversation, err := service.Start(t.TempDir(), AgentClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Send(context.Background(), conversation.ID, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Switch(conversation.ID, AgentCodex); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Send(context.Background(), conversation.ID, "second"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(runner.requests[1].Prompt, "ACTIVE AGENT") {
+		t.Fatalf("switch banner must not be sent as agent context: %q", runner.requests[1].Prompt)
+	}
+	messages, err := service.Messages(conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, message := range messages {
+		if message.Role == "system" && strings.Contains(message.Content, "ACTIVE AGENT: CODEX") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected visible CODEX switch banner")
+	}
+}

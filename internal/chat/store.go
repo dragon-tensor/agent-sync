@@ -124,6 +124,37 @@ func (s *Store) ListAgentSessions(chatID string) ([]AgentSession, error) {
 	return result, rows.Err()
 }
 
+func (s *Store) SaveMetrics(metrics AgentMetrics) error {
+	metrics.UpdatedAt = time.Now()
+	_, err := s.db.Exec(`INSERT INTO chat_agent_metrics (chat_id, agent, model, effort, input_tokens, output_tokens, context_window, cost_usd, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(chat_id, agent) DO UPDATE SET model=excluded.model, effort=excluded.effort, input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, context_window=excluded.context_window, cost_usd=excluded.cost_usd, updated_at=excluded.updated_at`,
+		metrics.ChatID, metrics.Agent, metrics.Model, metrics.Effort, metrics.InputTokens, metrics.OutputTokens, metrics.ContextWindow, metrics.CostUSD, stamp(metrics.UpdatedAt))
+	return err
+}
+
+func (s *Store) Metrics(chatID string) ([]AgentMetrics, error) {
+	rows, err := s.db.Query(`SELECT chat_id, agent, model, effort, input_tokens, output_tokens, context_window, cost_usd, updated_at FROM chat_agent_metrics WHERE chat_id = ?`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []AgentMetrics
+	for rows.Next() {
+		var metrics AgentMetrics
+		var updated string
+		if err := rows.Scan(&metrics.ChatID, &metrics.Agent, &metrics.Model, &metrics.Effort, &metrics.InputTokens, &metrics.OutputTokens, &metrics.ContextWindow, &metrics.CostUSD, &updated); err != nil {
+			return nil, err
+		}
+		metrics.UpdatedAt = parseStamp(updated)
+		result = append(result, metrics)
+	}
+	if result == nil {
+		result = []AgentMetrics{}
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) AddMessage(chatID, role, content string, agent Agent) (*Message, error) {
 	var sequence int
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(sequence), 0) + 1 FROM chat_messages WHERE chat_id = ?`, chatID).Scan(&sequence); err != nil {
@@ -141,7 +172,20 @@ func (s *Store) AddMessage(chatID, role, content string, agent Agent) (*Message,
 }
 
 func (s *Store) MessagesAfter(chatID string, sequence int) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT id, chat_id, sequence, role, content, agent, created_at FROM chat_messages WHERE chat_id = ? AND sequence > ? ORDER BY sequence`, chatID, sequence)
+	return s.messagesAfter(chatID, sequence, false)
+}
+
+func (s *Store) TransferMessagesAfter(chatID string, sequence int) ([]Message, error) {
+	return s.messagesAfter(chatID, sequence, true)
+}
+
+func (s *Store) messagesAfter(chatID string, sequence int, excludeSystem bool) ([]Message, error) {
+	query := `SELECT id, chat_id, sequence, role, content, agent, created_at FROM chat_messages WHERE chat_id = ? AND sequence > ?`
+	if excludeSystem {
+		query += ` AND role != 'system'`
+	}
+	query += ` ORDER BY sequence`
+	rows, err := s.db.Query(query, chatID, sequence)
 	if err != nil {
 		return nil, err
 	}

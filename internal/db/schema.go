@@ -166,6 +166,19 @@ CREATE TABLE IF NOT EXISTS chat_handoffs (
 
 CREATE INDEX IF NOT EXISTS idx_chat_handoffs_chat ON chat_handoffs(chat_id);
 
+CREATE TABLE IF NOT EXISTS chat_agent_metrics (
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    agent TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    effort TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    context_window INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(chat_id, agent)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content, tokenize='porter'
 );

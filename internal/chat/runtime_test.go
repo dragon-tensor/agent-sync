@@ -21,8 +21,24 @@ func TestCodexResumeCommandUsesPersistedSession(t *testing.T) {
 }
 
 func TestParseCodexOutput(t *testing.T) {
-	reply, sessionID := parseOutput(AgentCodex, "{\"type\":\"thread.started\",\"thread_id\":\"thread-123\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Done\"}}\n")
+	reply, sessionID, _ := parseOutput(AgentCodex, "{\"type\":\"thread.started\",\"thread_id\":\"thread-123\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Done\"}}\n")
 	if reply != "Done" || sessionID != "thread-123" {
 		t.Fatalf("got reply=%q session=%q", reply, sessionID)
+	}
+}
+
+func TestParseMetricsFromAgentEvents(t *testing.T) {
+	_, _, metrics := parseOutput(AgentCodex, "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":34},\"model\":\"gpt-5\",\"reasoning_effort\":\"high\"}\n")
+	if metrics.InputTokens != 12 || metrics.OutputTokens != 34 || metrics.Model != "gpt-5" || metrics.Effort != "high" {
+		t.Fatalf("unexpected metrics: %+v", metrics)
+	}
+}
+
+func TestACPAgentMapping(t *testing.T) {
+	if kind, ok := acpKind(AgentOpenCode); !ok || kind != "opencode" {
+		t.Fatalf("got %q %t", kind, ok)
+	}
+	if _, ok := acpKind(AgentClaude); ok {
+		t.Fatal("claude must not use ACP")
 	}
 }
