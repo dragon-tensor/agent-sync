@@ -134,6 +134,12 @@ CREATE TABLE IF NOT EXISTS chat_agent_sessions (
     agent TEXT NOT NULL,
     native_session_id TEXT NOT NULL DEFAULT '',
     last_delivered_sequence INTEGER NOT NULL DEFAULT 0,
+    runtime_kind TEXT NOT NULL DEFAULT '',
+    runtime_status TEXT NOT NULL DEFAULT 'stopped',
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    commands_json TEXT NOT NULL DEFAULT '[]',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    last_error TEXT NOT NULL DEFAULT '',
     last_active_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -149,11 +155,30 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     agent TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'dragon',
+    native_message_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(chat_id, sequence)
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_sequence ON chat_messages(chat_id, sequence);
+
+CREATE TABLE IF NOT EXISTS chat_message_queue (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    agent TEXT NOT NULL,
+    user_message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+    user_sequence INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_message_queue_chat_status
+    ON chat_message_queue(chat_id, status, created_at);
 
 CREATE TABLE IF NOT EXISTS chat_handoffs (
     id TEXT PRIMARY KEY,
@@ -173,6 +198,7 @@ CREATE TABLE IF NOT EXISTS chat_agent_metrics (
     effort TEXT NOT NULL DEFAULT '',
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
+    context_used INTEGER NOT NULL DEFAULT 0,
     context_window INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),

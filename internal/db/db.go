@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -37,6 +38,26 @@ func Open(path string) (*DB, error) {
 
 func (db *DB) migrate() error {
 	if _, err := db.Exec(SchemaSQL); err != nil {
+		return err
+	}
+	// SchemaSQL creates complete tables for new installs. These additions keep
+	// databases made by earlier Dragon Sync builds forward-compatible.
+	for _, statement := range []string{
+		`ALTER TABLE chat_agent_sessions ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE chat_agent_sessions ADD COLUMN runtime_status TEXT NOT NULL DEFAULT 'stopped'`,
+		`ALTER TABLE chat_agent_sessions ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE chat_agent_sessions ADD COLUMN commands_json TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE chat_agent_sessions ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE chat_agent_sessions ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE chat_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'dragon'`,
+		`ALTER TABLE chat_messages ADD COLUMN native_message_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE chat_agent_metrics ADD COLUMN context_used INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := db.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_native ON chat_messages(chat_id, agent, native_message_id) WHERE native_message_id != ''`); err != nil {
 		return err
 	}
 	db.Exec(`DELETE FROM providers WHERE rowid NOT IN (SELECT MIN(rowid) FROM providers GROUP BY type)`)

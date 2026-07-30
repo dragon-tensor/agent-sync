@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/agent-sync/agent-sync/internal/chat"
 	"github.com/agent-sync/agent-sync/pkg/types"
@@ -31,6 +32,7 @@ const (
 	pickerSwitch
 	pickerResume
 	pickerImport
+	pickerPermission
 )
 
 type choice struct{ label, value string }
@@ -46,11 +48,18 @@ type sentMessage struct {
 	message   *chat.Message
 	err       error
 	cancelled bool
+	queueID   string
 }
 
-type queuedMessage struct {
-	content string
-	localID string
+type nativeCommandFinished struct {
+	result chat.NativeCommandResult
+	err    error
+}
+
+type runtimePolled struct {
+	states []chat.RuntimeState
+	queue  []chat.QueueItem
+	err    error
 }
 
 type loadedChat struct {
@@ -58,6 +67,8 @@ type loadedChat struct {
 	messages []chat.Message
 	sessions []chat.AgentSession
 	metrics  []chat.AgentMetrics
+	queue    []chat.QueueItem
+	runtimes []chat.RuntimeState
 	err      error
 }
 
@@ -66,44 +77,57 @@ type importSessionsLoaded struct {
 	err      error
 }
 
+type runtimePulse struct{}
+type runtimeRefreshed struct{ err error }
+
 type Model struct {
-	service    *chat.Service
-	width      int
-	height     int
-	draft      string
-	status     string
-	path       string
-	project    string
-	current    *chat.Chat
-	messages   []chat.Message
-	sessions   []chat.AgentSession
-	metrics    map[chat.Agent]chat.AgentMetrics
-	busy       bool
-	cancelling bool
-	cancel     context.CancelFunc
-	queue      []queuedMessage
-	queuedID   map[string]bool
-	localID    int
-	picker     pickerMode
-	choices    []choice
-	selected   int
-	command    int
+	service      *chat.Service
+	width        int
+	height       int
+	draft        string
+	status       string
+	path         string
+	project      string
+	current      *chat.Chat
+	messages     []chat.Message
+	sessions     []chat.AgentSession
+	metrics      map[chat.Agent]chat.AgentMetrics
+	busy         bool
+	cancelling   bool
+	cancel       context.CancelFunc
+	queue        []chat.QueueItem
+	queuedID     map[string]bool
+	runtimes     map[chat.Agent]chat.RuntimeState
+	control      bool
+	escapeAt     time.Time
+	picker       pickerMode
+	choices      []choice
+	selected     int
+	command      int
+	permissionID string
 }
 
 func NewModel(service *chat.Service) Model {
 	project := currentDirectory()
-	return Model{service: service, status: "Enter /start to choose a local agent", path: displayDirectory(project), project: project, queuedID: map[string]bool{}, metrics: map[chat.Agent]chat.AgentMetrics{}}
+	return Model{service: service, status: "Enter /start to choose a local agent", path: displayDirectory(project), project: project, queuedID: map[string]bool{}, metrics: map[chat.Agent]chat.AgentMetrics{}, runtimes: map[chat.Agent]chat.RuntimeState{}}
 }
 
 func NewProgram(service *chat.Service) *tea.Program {
 	return tea.NewProgram(NewModel(service), tea.WithAltScreen())
 }
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd { return runtimeTick() }
 
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.current != nil {
+			chatID, agent := m.current.ID, m.current.ActiveAgent
+			cols, rows := m.controlSize()
+			return m, func() tea.Msg {
+				return runtimeRefreshed{err: m.service.ResizeRuntime(chatID, agent, cols, rows)}
+			}
+		}
 	case sentMessage:
 		m.busy, m.cancelling, m.cancel = false, false, nil
 		if msg.err != nil {
@@ -112,15 +136,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = "Agent error: " + oneLine(msg.err.Error())
 			}
-		} else {
-			m.messages = append(m.messages, *msg.message)
+		} else if msg.message != nil {
 			m.status = string(m.current.ActiveAgent) + " replied"
 		}
-		if len(m.queue) > 0 {
-			next := m.queue[0]
-			m.queue = m.queue[1:]
-			delete(m.queuedID, next.localID)
-			return m.startTurn(next.content)
+		return m, m.loadCurrent()
+	case nativeCommandFinished:
+		m.busy, m.cancelling, m.cancel = false, false, nil
+		if msg.err != nil {
+			m.status = "Native command error: " + oneLine(msg.err.Error())
+		} else if msg.result.AgentControl {
+			m.control = true
+			m.status = "Agent Control active · Ctrl+] returns to Dragon Sync"
+		} else {
+			m.status = string(m.current.ActiveAgent) + " completed the command"
 		}
 		return m, m.loadCurrent()
 	case loadedChat:
@@ -128,10 +156,43 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Storage error: " + oneLine(msg.err.Error())
 			return m, nil
 		}
-		m.current, m.messages, m.sessions = msg.chat, msg.messages, msg.sessions
+		m.current, m.messages, m.sessions, m.queue = msg.chat, msg.messages, msg.sessions, msg.queue
 		m.metrics = map[chat.Agent]chat.AgentMetrics{}
 		for _, metrics := range msg.metrics {
 			m.metrics[metrics.Agent] = metrics
+		}
+		m.runtimes = map[chat.Agent]chat.RuntimeState{}
+		for _, state := range msg.runtimes {
+			m.runtimes[state.Agent] = state
+		}
+		m.rebuildQueuedIDs()
+		if !m.busy {
+			if next := m.nextQueued(); next != nil {
+				return m.startTurn(next.ID)
+			}
+		}
+		return m, nil
+	case runtimePulse:
+		return m, tea.Batch(runtimeTick(), m.pollRuntime())
+	case runtimeRefreshed:
+		if msg.err != nil {
+			m.status = "Native terminal error: " + oneLine(msg.err.Error())
+		}
+		return m, m.pollRuntime()
+	case runtimePolled:
+		if msg.err != nil {
+			return m, nil
+		}
+		m.queue = msg.queue
+		m.rebuildQueuedIDs()
+		for _, state := range msg.states {
+			m.runtimes[state.Agent] = state
+			if state.Metrics.Model != "" || state.Metrics.InputTokens != 0 || state.Metrics.OutputTokens != 0 {
+				m.metrics[state.Agent] = state.Metrics
+			}
+			if state.Agent == m.activeAgent() && state.PendingApproval != nil && m.picker == pickerNone {
+				m.openPermissionPicker(state.PendingApproval)
+			}
 		}
 		return m, nil
 	case importSessionsLoaded:
@@ -151,21 +212,55 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "Choose a local session to import"
 		return m, nil
 	case tea.KeyMsg:
+		if m.picker != pickerNone {
+			return m.updatePicker(msg)
+		}
+		if m.control {
+			if msg.String() == "ctrl+]" {
+				if m.current != nil {
+					m.service.LeaveAgentControl(m.current.ID, m.current.ActiveAgent)
+				}
+				m.control = false
+				m.status = "Returned to Dragon Sync chat"
+				return m, nil
+			}
+			if m.current == nil {
+				m.control = false
+				return m, nil
+			}
+			value := terminalKey(msg)
+			if len(value) == 0 {
+				return m, nil
+			}
+			chatID, agent := m.current.ID, m.current.ActiveAgent
+			return m, func() tea.Msg {
+				if err := m.service.SendRuntimeKey(chatID, agent, value); err != nil {
+					return runtimeRefreshed{err: err}
+				}
+				return runtimeRefreshed{}
+			}
+		}
 		if m.busy {
 			if msg.String() == "ctrl+c" || msg.String() == "ctrl+q" {
 				return m, tea.Quit
 			}
 			if msg.String() == "esc" && m.cancel != nil {
-				m.cancelling = true
-				m.status = "Cancelling active agent run…"
+				now := time.Now()
+				if m.escapeAt.IsZero() || now.Sub(m.escapeAt) > 600*time.Millisecond {
+					m.escapeAt = now
+					m.status = "Press Esc again to cancel the active run"
+					return m, nil
+				}
+				m.escapeAt = time.Time{}
+				m.cancelling, m.status = true, "Cancelling active agent run…"
 				m.cancel()
+				if m.current != nil {
+					_ = m.service.CancelRuntime(m.current.ID, m.current.ActiveAgent)
+				}
 				return m, nil
 			}
 		}
-		if m.picker != pickerNone {
-			return m.updatePicker(msg)
-		}
-		matches := matchingCommands(m.draft)
+		matches := m.commandMatches(m.draft)
 		switch msg.String() {
 		case "ctrl+c", "ctrl+q", "esc":
 			return m, tea.Quit
@@ -204,14 +299,21 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	if input == "" {
 		return m, nil
 	}
-	if !m.busy {
-		if matches := matchingCommands(input); len(matches) > 0 {
-			m.command = m.command % len(matches)
-			input = matches[m.command].value
-		}
+	if matches := m.commandMatches(input); len(matches) > 0 {
+		m.command = m.command % len(matches)
+		input = matches[m.command].value
 	}
 	m.draft = ""
-	if !m.busy {
+
+	forceNative := strings.HasPrefix(input, "//")
+	if forceNative {
+		input = input[1:]
+	}
+	if !forceNative && isDragonCommand(input) {
+		if m.busy {
+			m.status = "Wait for or cancel the active run before changing Dragon Sync sessions"
+			return m, nil
+		}
 		switch input {
 		case "/start":
 			m.openAgentPicker(pickerStart)
@@ -252,26 +354,48 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		m.status = "Use /start to create a chat before sending a message"
 		return m, nil
 	}
-	m.localID++
-	localID := fmt.Sprintf("local-%d", m.localID)
-	m.messages = append(m.messages, chat.Message{ID: localID, Role: "user", Content: input, Agent: m.current.ActiveAgent})
+
+	if strings.HasPrefix(input, "/") {
+		if m.busy {
+			m.status = "Native commands cannot be queued while the agent is working"
+			return m, nil
+		}
+		return m.startNativeCommand(input)
+	}
+
+	item, message, err := m.service.Enqueue(m.current.ID, input)
+	if err != nil {
+		m.status = "Could not queue message: " + oneLine(err.Error())
+		return m, nil
+	}
+	m.messages = append(m.messages, *message)
+	m.queue = append(m.queue, *item)
+	m.queuedID[message.ID] = true
 	if m.busy {
-		m.queue = append(m.queue, queuedMessage{content: input, localID: localID})
-		m.queuedID[localID] = true
 		m.status = fmt.Sprintf("Queued %d message(s) · %s is working…", len(m.queue), strings.ToUpper(string(m.current.ActiveAgent)))
 		return m, nil
 	}
-	return m.startTurn(input)
+	return m.startTurn(item.ID)
 }
 
-func (m Model) startTurn(input string) (tea.Model, tea.Cmd) {
+func (m Model) startTurn(queueID string) (tea.Model, tea.Cmd) {
 	m.busy, m.status = true, "Sending to "+string(m.current.ActiveAgent)+"…"
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	return m, func() tea.Msg {
+		reply, err := m.service.RunQueueItem(ctx, queueID)
+		return sentMessage{message: reply, err: err, cancelled: ctx.Err() != nil, queueID: queueID}
+	}
+}
+
+func (m Model) startNativeCommand(command string) (tea.Model, tea.Cmd) {
+	m.busy, m.status = true, "Sending native command to "+string(m.current.ActiveAgent)+"…"
 	chatID := m.current.ID
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	return m, func() tea.Msg {
-		reply, err := m.service.Send(ctx, chatID, input)
-		return sentMessage{message: reply, err: err, cancelled: ctx.Err() != nil}
+		result, err := m.service.RunNativeCommand(ctx, chatID, command)
+		return nativeCommandFinished{result: result, err: err}
 	}
 }
 
@@ -296,6 +420,10 @@ func (m *Model) openAgentPicker(mode pickerMode) {
 func (m Model) updatePicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "esc":
+		if m.picker == pickerPermission && m.current != nil {
+			_ = m.service.ResolvePermission(m.current.ID, m.current.ActiveAgent, m.permissionID, "")
+			m.permissionID = ""
+		}
 		m.picker, m.choices, m.status = pickerNone, nil, "Selection cancelled"
 		return m, nil
 	case "up", "k":
@@ -347,9 +475,31 @@ func (m Model) updatePicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.current, m.status = imported, "Imported into Dragon Sync; switch agents whenever you want"
 			return m, m.loadCurrent()
+		case pickerPermission:
+			if m.current == nil {
+				return m, nil
+			}
+			if err := m.service.ResolvePermission(m.current.ID, m.current.ActiveAgent, m.permissionID, picked.value); err != nil {
+				m.status = "Could not answer permission request: " + oneLine(err.Error())
+			} else {
+				m.status = "Permission response sent to " + strings.ToUpper(string(m.current.ActiveAgent))
+			}
+			m.permissionID = ""
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) openPermissionPicker(request *chat.PermissionRequest) {
+	if request == nil {
+		return
+	}
+	m.picker, m.selected, m.choices = pickerPermission, 0, nil
+	m.permissionID = request.ID
+	for _, option := range request.Options {
+		m.choices = append(m.choices, choice{label: option.Label, value: option.ID})
+	}
+	m.status = request.Title
 }
 
 func (m Model) loadCurrent() tea.Cmd {
@@ -377,7 +527,15 @@ func (m Model) loadChat(id string) tea.Cmd {
 		if err != nil {
 			return loadedChat{err: err}
 		}
-		return loadedChat{chat: item, messages: messages, sessions: sessions, metrics: metrics}
+		queue, err := m.service.Queue(id)
+		if err != nil {
+			return loadedChat{err: err}
+		}
+		runtimes, err := m.service.RuntimeStates(id)
+		if err != nil {
+			return loadedChat{err: err}
+		}
+		return loadedChat{chat: item, messages: messages, sessions: sessions, metrics: metrics, queue: queue, runtimes: runtimes}
 	}
 }
 
@@ -413,7 +571,16 @@ func (m Model) chatPanel(width, height int) string {
 	if m.current != nil {
 		title, meta = m.current.Title, "active · "+strings.ToUpper(string(m.current.ActiveAgent))
 	}
+	if m.control {
+		meta = "AGENT CONTROL · " + strings.ToUpper(string(m.current.ActiveAgent))
+	}
 	header := lipgloss.JoinHorizontal(lipgloss.Center, lipgloss.NewStyle().Bold(true).Foreground(text).Render(trim(title, 36)), "  ", lipgloss.NewStyle().Foreground(muted).Render(meta))
+	if m.control {
+		content := m.terminalView(inner-4, max(8, height-6))
+		hint := lipgloss.NewStyle().Foreground(muted).Render("Native terminal input active · Ctrl+] return to Dragon Sync")
+		return lipgloss.NewStyle().Border(terminalBorder).BorderForeground(accent).Padding(1, 1).Width(max(20, width-2)).Height(height).
+			Render(lipgloss.JoinVertical(lipgloss.Left, header, "", content, "", hint))
+	}
 	content := m.conversation(inner - 4)
 	if m.picker != pickerNone {
 		content = m.pickerView(inner - 4)
@@ -426,10 +593,13 @@ func (m Model) chatPanel(width, height int) string {
 	inputContent := ""
 	if draft == "" {
 		placeholder := m.placeholder()
-		if len(placeholder) > 0 {
-			placeholder = placeholder[1:]
+		placeholderRunes := []rune(placeholder)
+		if len(placeholderRunes) > 0 {
+			slab := lipgloss.NewStyle().Background(accent).Foreground(background).Render(string(placeholderRunes[0]))
+			inputContent = lipgloss.JoinHorizontal(lipgloss.Top, slab, lipgloss.NewStyle().Foreground(muted).Render(string(placeholderRunes[1:])))
+		} else {
+			inputContent = cursor
 		}
-		inputContent = lipgloss.JoinHorizontal(lipgloss.Top, cursor, lipgloss.NewStyle().Foreground(muted).Render(placeholder))
 	} else {
 		inputContent = lipgloss.JoinHorizontal(lipgloss.Top, lipgloss.NewStyle().Foreground(text).Render(draft), cursor)
 	}
@@ -438,6 +608,21 @@ func (m Model) chatPanel(width, height int) string {
 		input = lipgloss.JoinVertical(lipgloss.Left, suggestions, input)
 	}
 	return lipgloss.NewStyle().Border(terminalBorder).BorderForeground(border).Padding(1, 1).Width(max(20, width-2)).Height(height).Render(lipgloss.JoinVertical(lipgloss.Left, header, "", content, blank, input))
+}
+
+func (m Model) terminalView(width, height int) string {
+	state, ok := m.runtimes[m.activeAgent()]
+	if !ok || strings.TrimSpace(state.Terminal) == "" {
+		return lipgloss.NewStyle().Foreground(muted).Width(width).Height(height).Render("Starting native agent terminal…")
+	}
+	lines := strings.Split(state.Terminal, "\n")
+	if len(lines) > height {
+		lines = lines[len(lines)-height:]
+	}
+	for index := range lines {
+		lines[index] = trim(lines[index], width)
+	}
+	return lipgloss.NewStyle().Foreground(text).Width(width).Height(height).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) conversation(width int) string {
@@ -473,6 +658,8 @@ func (m Model) pickerView(width int) string {
 		title = "RESUME CHAT"
 	} else if m.picker == pickerImport {
 		title = "IMPORT SESSION"
+	} else if m.picker == pickerPermission {
+		title = "AGENT PERMISSION"
 	}
 	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(accent).Render(title), lipgloss.NewStyle().Foreground(muted).Render("↑/↓ choose · enter confirm · esc cancel"), ""}
 	for index, item := range m.choices {
@@ -497,6 +684,35 @@ func (m Model) sidePanel(width, height int) string {
 		return lipgloss.JoinVertical(lipgloss.Left, lipgloss.NewStyle().Foreground(muted).Render(label), lipgloss.NewStyle().Foreground(text).Render(value))
 	}
 	chain := []string{chainRow("CURRENT", current, accent)}
+	seenAgents := map[chat.Agent]bool{}
+	var runtimeLines []string
+	if m.current != nil {
+		agents := []chat.Agent{m.current.ActiveAgent}
+		seenAgents[m.current.ActiveAgent] = true
+		for _, session := range m.sessions {
+			if !seenAgents[session.Agent] {
+				agents = append(agents, session.Agent)
+				seenAgents[session.Agent] = true
+			}
+		}
+		for _, agent := range agents {
+			state := m.runtimes[agent]
+			status := state.Status
+			if status == "" {
+				status = chat.RuntimeStopped
+			}
+			marker := "○"
+			color := muted
+			if status == chat.RuntimeWorking {
+				marker, color = "●", accent
+			} else if status == chat.RuntimeWaitingForUser {
+				marker, color = "!", accent
+			} else if status == chat.RuntimeCrashed {
+				marker = "×"
+			}
+			runtimeLines = append(runtimeLines, lipgloss.NewStyle().Foreground(color).Render(fmt.Sprintf("%s %-10s %s", marker, strings.ToUpper(string(agent)), status)))
+		}
+	}
 	for index, session := range m.sessions {
 		if m.current != nil && session.Agent == m.current.ActiveAgent {
 			continue
@@ -514,9 +730,40 @@ func (m Model) sidePanel(width, height int) string {
 		if metrics.Effort != "" {
 			metricLines = append(metricLines, section("EFFORT", metrics.Effort))
 		}
-		metricLines = append(metricLines, section("TOKENS", tokenLabel(metrics)), section("CONTEXT WINDOW", valueOrDash(metrics.ContextWindow)), section("COST", costLabel(metrics.CostUSD)))
+		metricLines = append(metricLines, section("TOKENS", tokenLabel(metrics)), section("CONTEXT", contextLabel(metrics)), section("COST", costLabel(metrics.CostUSD)))
 	}
-	content := lipgloss.JoinVertical(lipgloss.Left, lipgloss.NewStyle().Bold(true).Foreground(text).Render("Session info"), "", section("CURRENT AGENT", current), "", section("PREVIOUS AGENT", previous), "", section("LEDGER MESSAGES", fmt.Sprintf("%d", len(m.messages))), section("AGENT SESSIONS", fmt.Sprintf("%d", len(m.sessions))), section("THREADS", "01"), "\n"+strings.Join(metricLines, "\n"), "\n"+lipgloss.NewStyle().Bold(true).Foreground(text).Render("Agent chain"), "", strings.Join(chain, "\n"), "\n"+lipgloss.NewStyle().Bold(true).Foreground(text).Render("Commands"), lipgloss.NewStyle().Foreground(muted).Render("/start /resume /switch /import"))
+	commandNames := []string{"/start", "/resume", "/switch", "/import"}
+	if m.current != nil {
+		for _, command := range m.service.NativeCommands(m.current.ID, m.current.ActiveAgent) {
+			if len(commandNames) >= 9 {
+				break
+			}
+			commandNames = append(commandNames, command.Name)
+		}
+	}
+	runtimeBlock := lipgloss.NewStyle().Foreground(muted).Render("No runtime started")
+	if len(runtimeLines) > 0 {
+		runtimeBlock = strings.Join(runtimeLines, "\n")
+	}
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
+		lipgloss.NewStyle().Bold(true).Foreground(text).Render("Background agents"),
+		"",
+		runtimeBlock,
+		"\n"+lipgloss.NewStyle().Bold(true).Foreground(text).Render("Session info"),
+		"",
+		section("CURRENT AGENT", current),
+		section("PREVIOUS AGENT", previous),
+		section("LEDGER MESSAGES", fmt.Sprintf("%d", len(m.messages))),
+		section("QUEUED", fmt.Sprintf("%d", len(m.queue))),
+		section("THREADS", "01"),
+		"\n"+strings.Join(metricLines, "\n"),
+		"\n"+lipgloss.NewStyle().Bold(true).Foreground(text).Render("Agent chain"),
+		"",
+		strings.Join(chain, "\n"),
+		"\n"+lipgloss.NewStyle().Bold(true).Foreground(text).Render("Commands"),
+		lipgloss.NewStyle().Foreground(muted).Render(strings.Join(commandNames, " ")),
+	)
 	return lipgloss.NewStyle().Border(terminalBorder).BorderForeground(border).Padding(1, 1).Width(max(20, width-2)).Height(height).Render(content)
 }
 
@@ -527,7 +774,14 @@ func chainLink() string { return lipgloss.NewStyle().Foreground(border).Render("
 
 func (m Model) footer(width int) string {
 	directory := lipgloss.NewStyle().Foreground(muted).Render("DIR ") + lipgloss.NewStyle().Foreground(text).Render(m.path)
-	hints := lipgloss.NewStyle().Foreground(muted).Render("enter send  ·  esc quit")
+	hintText := "enter send  ·  esc quit"
+	if m.busy {
+		hintText = "enter queue  ·  esc esc cancel"
+	}
+	if m.control {
+		hintText = "native keys active  ·  ctrl+] return"
+	}
+	hints := lipgloss.NewStyle().Foreground(muted).Render(hintText)
 	status := lipgloss.NewStyle().Foreground(muted).Render(m.status)
 	if width < 100 {
 		return lipgloss.NewStyle().Width(width).Padding(0, 1, 1).Render(lipgloss.JoinVertical(lipgloss.Left, lipgloss.JoinHorizontal(lipgloss.Center, directory, "  ", status), hints))
@@ -543,7 +797,7 @@ func (m Model) placeholder() string {
 }
 
 func (m Model) commandSuggestions(width int) string {
-	matches := matchingCommands(m.draft)
+	matches := m.commandMatches(m.draft)
 	if len(matches) == 0 || strings.TrimSpace(m.draft) == "" {
 		return ""
 	}
@@ -558,6 +812,47 @@ func (m Model) commandSuggestions(width int) string {
 	return lipgloss.NewStyle().Border(terminalBorder).BorderForeground(border).Padding(0, 1).Width(max(20, width-2)).Render(strings.Join(lines, "\n"))
 }
 
+func (m Model) commandMatches(draft string) []choice {
+	prefix := strings.ToLower(strings.TrimSpace(draft))
+	if !strings.HasPrefix(prefix, "/") {
+		return nil
+	}
+	forceNative := strings.HasPrefix(prefix, "//")
+	matchPrefix := prefix
+	if forceNative {
+		matchPrefix = prefix[1:]
+	}
+	var matches []choice
+	seen := map[string]bool{}
+	if !forceNative {
+		for _, command := range commands {
+			if strings.HasPrefix(command.value, matchPrefix) {
+				matches = append(matches, command)
+				seen[command.value] = true
+			}
+		}
+	}
+	if m.current != nil {
+		for _, command := range m.service.NativeCommands(m.current.ID, m.current.ActiveAgent) {
+			name := strings.ToLower(command.Name)
+			if !strings.HasPrefix(name, matchPrefix) || seen[name] {
+				continue
+			}
+			value := command.Name
+			if forceNative {
+				value = "/" + value
+			}
+			label := value
+			if command.Description != "" {
+				label += "  ·  " + command.Description
+			}
+			matches = append(matches, choice{label: label, value: value})
+			seen[name] = true
+		}
+	}
+	return matches
+}
+
 func matchingCommands(draft string) []choice {
 	prefix := strings.ToLower(strings.TrimSpace(draft))
 	if !strings.HasPrefix(prefix, "/") {
@@ -570,6 +865,112 @@ func matchingCommands(draft string) []choice {
 		}
 	}
 	return matches
+}
+
+func isDragonCommand(value string) bool {
+	for _, command := range commands {
+		if value == command.value {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeTick() tea.Cmd {
+	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return runtimePulse{} })
+}
+
+func (m Model) pollRuntime() tea.Cmd {
+	if m.current == nil {
+		return nil
+	}
+	chatID := m.current.ID
+	return func() tea.Msg {
+		states, err := m.service.RuntimeStates(chatID)
+		if err != nil {
+			return runtimePolled{err: err}
+		}
+		queue, err := m.service.Queue(chatID)
+		return runtimePolled{states: states, queue: queue, err: err}
+	}
+}
+
+func (m *Model) rebuildQueuedIDs() {
+	m.queuedID = map[string]bool{}
+	for _, item := range m.queue {
+		if item.Status == chat.QueueQueued || item.Status == chat.QueueRunning {
+			m.queuedID[item.UserMessageID] = true
+		}
+	}
+}
+
+func (m Model) nextQueued() *chat.QueueItem {
+	for index := range m.queue {
+		if m.queue[index].Status == chat.QueueQueued {
+			item := m.queue[index]
+			return &item
+		}
+	}
+	return nil
+}
+
+func (m Model) activeAgent() chat.Agent {
+	if m.current == nil {
+		return ""
+	}
+	return m.current.ActiveAgent
+}
+
+func (m Model) controlSize() (int, int) {
+	cols := max(40, m.width-40)
+	if m.width < 92 {
+		cols = max(40, m.width-8)
+	}
+	return cols, max(10, m.height-14)
+}
+
+func terminalKey(message tea.KeyMsg) []byte {
+	if len(message.Runes) > 0 {
+		return []byte(string(message.Runes))
+	}
+	switch message.String() {
+	case "enter":
+		return []byte{'\r'}
+	case "tab":
+		return []byte{'\t'}
+	case "backspace":
+		return []byte{0x7f}
+	case "esc":
+		return []byte{0x1b}
+	case "up":
+		return []byte("\x1b[A")
+	case "down":
+		return []byte("\x1b[B")
+	case "right":
+		return []byte("\x1b[C")
+	case "left":
+		return []byte("\x1b[D")
+	case "home":
+		return []byte("\x1b[H")
+	case "end":
+		return []byte("\x1b[F")
+	case "pgup":
+		return []byte("\x1b[5~")
+	case "pgdown":
+		return []byte("\x1b[6~")
+	case "delete":
+		return []byte("\x1b[3~")
+	case "ctrl+space":
+		return []byte{0}
+	}
+	value := message.String()
+	if strings.HasPrefix(value, "ctrl+") && len(value) == 6 {
+		letter := value[5]
+		if letter >= 'a' && letter <= 'z' {
+			return []byte{letter - 'a' + 1}
+		}
+	}
+	return nil
 }
 
 func currentDirectory() string {
@@ -606,11 +1007,18 @@ func tokenLabel(metrics chat.AgentMetrics) string {
 	return fmt.Sprintf("%d in · %d out", metrics.InputTokens, metrics.OutputTokens)
 }
 
-func valueOrDash(value int) string {
-	if value == 0 {
+func contextLabel(metrics chat.AgentMetrics) string {
+	if metrics.ContextUsed == 0 && metrics.ContextWindow == 0 {
 		return "—"
 	}
-	return fmt.Sprintf("%d", value)
+	if metrics.ContextWindow == 0 {
+		return fmt.Sprintf("%d used", metrics.ContextUsed)
+	}
+	if metrics.ContextUsed == 0 {
+		return fmt.Sprintf("%d window", metrics.ContextWindow)
+	}
+	percent := float64(metrics.ContextUsed) / float64(metrics.ContextWindow) * 100
+	return fmt.Sprintf("%d / %d · %.0f%%", metrics.ContextUsed, metrics.ContextWindow, percent)
 }
 
 func costLabel(value float64) string {

@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/agent-sync/agent-sync/internal/agenthost"
 	"github.com/google/uuid"
@@ -33,32 +32,6 @@ type Runner interface {
 }
 
 type CommandRunner struct{}
-
-// BackgroundRunner keeps ACP-capable agents alive behind Dragon Sync.  A
-// process is scoped to one Dragon chat + one agent, so switching away does not
-// discard the tool's own active context.
-type BackgroundRunner struct {
-	fallback Runner
-	mu       sync.Mutex
-	sessions map[string]*backgroundSession
-}
-
-type backgroundSession struct {
-	host    *agenthost.ACPHost
-	id      string
-	chatID  string
-	agent   Agent
-	mu      sync.Mutex
-	text    strings.Builder
-	metrics AgentMetrics
-}
-
-func NewBackgroundRunner(fallback Runner) *BackgroundRunner {
-	if fallback == nil {
-		fallback = CommandRunner{}
-	}
-	return &BackgroundRunner{fallback: fallback, sessions: map[string]*backgroundSession{}}
-}
 
 func AvailableAgents() []Agent {
 	candidates := []Agent{AgentClaude, AgentCodex, AgentOpenCode, AgentGemini}
@@ -93,86 +66,6 @@ func (CommandRunner) Run(ctx context.Context, request RunRequest) (RunResult, er
 	}
 	metrics.Agent = request.Agent
 	return RunResult{Reply: reply, NativeSessionID: nativeID, Metrics: metrics}, nil
-}
-
-func (r *BackgroundRunner) Run(ctx context.Context, request RunRequest) (RunResult, error) {
-	kind, supported := acpKind(request.Agent)
-	if !supported {
-		return r.fallback.Run(ctx, request)
-	}
-	session, err := r.getSession(kind, request)
-	if err != nil {
-		return r.fallback.Run(ctx, request)
-	}
-	session.mu.Lock()
-	session.text.Reset()
-	session.metrics = AgentMetrics{Agent: request.Agent}
-	session.mu.Unlock()
-
-	cancelled := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = session.host.Cancel(session.id)
-		case <-cancelled:
-		}
-	}()
-	err = session.host.Prompt(ctx, session.id, request.Prompt)
-	close(cancelled)
-	if err != nil {
-		return RunResult{}, err
-	}
-	session.mu.Lock()
-	reply, metrics := strings.TrimSpace(session.text.String()), session.metrics
-	session.mu.Unlock()
-	if reply == "" {
-		return RunResult{}, fmt.Errorf("%s returned no readable streamed response", request.Agent)
-	}
-	return RunResult{Reply: reply, NativeSessionID: session.id, Metrics: metrics}, nil
-}
-
-func (r *BackgroundRunner) getSession(kind agenthost.Kind, request RunRequest) (*backgroundSession, error) {
-	key := request.ChatID + ":" + string(request.Agent)
-	r.mu.Lock()
-	if session := r.sessions[key]; session != nil {
-		r.mu.Unlock()
-		return session, nil
-	}
-	r.mu.Unlock()
-	host, err := agenthost.Start(context.Background(), kind, request.ProjectDir)
-	if err != nil {
-		return nil, err
-	}
-	created, err := host.NewSession(context.Background(), request.ProjectDir)
-	if err != nil {
-		_ = host.Close()
-		return nil, err
-	}
-	session := &backgroundSession{host: host, id: created.ID, chatID: request.ChatID, agent: request.Agent}
-	go session.consume()
-	r.mu.Lock()
-	if existing := r.sessions[key]; existing != nil {
-		r.mu.Unlock()
-		_ = host.Close()
-		return existing, nil
-	}
-	r.sessions[key] = session
-	r.mu.Unlock()
-	return session, nil
-}
-
-func (s *backgroundSession) consume() {
-	for event := range s.host.Events() {
-		if id := findStringJSON(event.Params, "sessionId", "session_id"); id != "" && id != s.id {
-			continue
-		}
-		s.mu.Lock()
-		if text := findAgentTextJSON(event.Params); text != "" {
-			s.text.WriteString(text)
-		}
-		s.metrics = mergeMetrics(s.metrics, findMetricsJSON(event.Params))
-		s.mu.Unlock()
-	}
 }
 
 func acpKind(agent Agent) (agenthost.Kind, bool) {
@@ -334,8 +227,9 @@ func findMetrics(value any) AgentMetrics {
 		Effort:        findString(value, "effort", "reasoning_effort", "reasoningEffort"),
 		InputTokens:   int(findNumber(value, "input_tokens", "inputTokens", "prompt_tokens", "promptTokens")),
 		OutputTokens:  int(findNumber(value, "output_tokens", "outputTokens", "completion_tokens", "completionTokens")),
+		ContextUsed:   int(findNumber(value, "context_used", "contextUsed")),
 		ContextWindow: int(findNumber(value, "context_window", "contextWindow", "context_length", "contextLength")),
-		CostUSD:       findNumber(value, "total_cost_usd", "cost_usd", "costUSD"),
+		CostUSD:       findCostUSD(value),
 	}
 }
 
@@ -346,21 +240,6 @@ func findMetricsJSON(raw json.RawMessage) AgentMetrics {
 	}
 	return findMetrics(value)
 }
-func findStringJSON(raw json.RawMessage, keys ...string) string {
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return ""
-	}
-	return findString(value, keys...)
-}
-func findAgentTextJSON(raw json.RawMessage) string {
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return ""
-	}
-	return findAgentReply(value)
-}
-
 func mergeMetrics(current, next AgentMetrics) AgentMetrics {
 	if next.Model != "" {
 		current.Model = next.Model
@@ -373,6 +252,9 @@ func mergeMetrics(current, next AgentMetrics) AgentMetrics {
 	}
 	if next.OutputTokens != 0 {
 		current.OutputTokens = next.OutputTokens
+	}
+	if next.ContextUsed != 0 {
+		current.ContextUsed = next.ContextUsed
 	}
 	if next.ContextWindow != 0 {
 		current.ContextWindow = next.ContextWindow
@@ -422,6 +304,36 @@ func findNumber(value any, keys ...string) float64 {
 	case []any:
 		for _, candidate := range x {
 			if result := findNumber(candidate, keys...); result != 0 {
+				return result
+			}
+		}
+	}
+	return 0
+}
+
+func findCostUSD(value any) float64 {
+	switch x := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"total_cost_usd", "cost_usd", "costUSD"} {
+			if result, ok := x[key].(float64); ok {
+				return result
+			}
+		}
+		if cost, ok := x["cost"].(map[string]any); ok {
+			currency, _ := cost["currency"].(string)
+			amount, _ := cost["amount"].(float64)
+			if strings.EqualFold(currency, "USD") {
+				return amount
+			}
+		}
+		for _, child := range x {
+			if result := findCostUSD(child); result != 0 {
+				return result
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if result := findCostUSD(child); result != 0 {
 				return result
 			}
 		}

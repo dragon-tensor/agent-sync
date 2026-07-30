@@ -17,7 +17,11 @@ Dragon Sync keeps a private conversation ledger on your machine while each agent
 - Resumes previous Dragon Sync chats with `/resume`.
 - Switches tools with `/switch` while transferring only the work the destination agent has not yet received.
 - Imports detected local history into a new Dragon Sync chat with `/import`.
-- Queues messages while an agent is working and supports cancellation with `Esc`.
+- Persists queued messages across Dragon Sync restarts.
+- Keeps structured or native-control agent processes alive in background tabs.
+- Routes the active agent's slash commands directly—there is no `/native` mode.
+- Supports interactive native pickers and prompts inside an embedded Agent Control terminal.
+- Cancels an active turn with two presses of `Esc`.
 - Shows the agent chain plus any model, effort, token, context-window, and cost data the provider reports.
 
 ## Quick start
@@ -49,6 +53,8 @@ GOCACHE=/tmp/dragon-sync-gocache GOFLAGS=-mod=mod go run ./cmd/sync
 ```
 
 Dragon Sync stores its local database and configuration under `~/.agent-sync/`.
+Set `DRAGON_SYNC_DATA_DIR` or `DRAGON_SYNC_DB_PATH` to use another local
+location, which is useful for isolated development and smoke tests.
 
 ## First chat
 
@@ -74,24 +80,51 @@ Claude  ── work ──► OpenCode  ── work ──► Claude
 | `/resume` | Open a previous Dragon Sync chat. |
 | `/switch` | Change the active agent in the current chat. |
 | `/import` | Scan local supported-tool histories and import a session. |
-| `/` | Show Dragon Sync command suggestions. |
+| `/` | Show merged Dragon Sync and active-agent command suggestions. |
+| `//command` | Force `/command` to the active agent if its name collides with a Dragon Sync command. |
 | `↑` / `↓` | Move through command or picker suggestions. |
-| `Tab` | Complete the highlighted Dragon Sync command. |
+| `Tab` | Complete the highlighted command. |
 | `Enter` | Send a message, queue one while work is running, or confirm a selection. |
-| `Esc` | Cancel the active agent run. |
+| `Esc`, `Esc` | Cancel the active agent run. |
+| `Ctrl+]` | Leave Agent Control and return to the unified chat. |
 | `Ctrl+C` / `Ctrl+Q` | Exit Dragon Sync. |
 
 ## Agent support
 
-| Agent | Local chat | Session switching | Imported history |
-| --- | --- | --- | --- |
-| Claude Code | Yes | Yes | Yes |
-| Codex | Yes | Yes | Yes |
-| OpenCode | Yes | Yes | Yes |
-| Gemini | Yes | Yes | Yes |
-| Cursor | Import only | — | Yes, when detected |
+| Agent | Turn runtime | Native commands | Session switching | Imported history |
+| --- | --- | --- | --- | --- |
+| Claude Code | Structured CLI + background PTY | Embedded native terminal | Yes | Yes |
+| Codex | Structured CLI + background PTY | Embedded native terminal | Yes | Yes |
+| OpenCode | Persistent ACP | ACP-advertised commands | Yes | Yes |
+| Gemini | Persistent ACP | ACP-advertised commands | Yes | Yes |
+| Cursor | Import only | — | — | Yes, when detected |
 
-OpenCode and Gemini are being moved to persistent ACP-backed background sessions. Claude and Codex currently use their native persisted-session command paths while their background adapters are completed.
+OpenCode and Gemini run as long-lived ACP subprocesses and report command,
+configuration, permission, usage, and message events to Dragon Sync. Claude and
+Codex retain their real resumable TUI in a PTY-backed background tab; commands
+that open native menus switch the conversation panel into Agent Control.
+
+PTY-backed Agent Control currently targets Linux and macOS terminals.
+
+## How background sessions work
+
+Each `(Dragon chat, agent)` pair owns an independent runtime:
+
+```text
+Dragon chat
+├── Claude session    idle / working / waiting / crashed
+├── Codex session     idle / working / waiting / crashed
+└── OpenCode session  idle / working / waiting / crashed
+```
+
+Switching changes the active tab without discarding its native session ID.
+Dragon Sync serializes workspace turns in the single-chat MVP, preventing two
+agents from editing the same working tree simultaneously. Messages entered
+while a turn is running are stored in SQLite and processed in order.
+
+If a process exits unexpectedly, its tab is marked as crashed. The next turn
+restarts or resumes it from the persisted native session where the provider
+supports resumption.
 
 ## Development
 
@@ -114,15 +147,18 @@ GOCACHE=/tmp/dragon-sync-gocache GOFLAGS=-mod=mod go build -o /tmp/sync ./cmd/sy
 cmd/dragon-sync      main CLI entry point
 cmd/sync             short CLI alias
 internal/tui         minimal terminal interface
-internal/chat        canonical ledger, switching, queueing, metrics
-internal/agenthost   persistent local agent-process host
+internal/chat        canonical ledger, durable queue, runtime manager, switching
+internal/agenthost   ACP and PTY-backed local agent-process hosts
 internal/db          local SQLite storage and migrations
 internal/sync        read-only history import adapters
 ```
 
 ## Current MVP boundary
 
-Dragon Sync is local-first and intentionally keeps the conversation ledger on your machine. Multi-thread workspaces, cloud sync, and complete provider-native command/control surfaces are the next layers; the current focus is making one dependable, switchable local chat work well.
+Dragon Sync is local-first and intentionally keeps the conversation ledger on
+your machine. Multi-thread workspaces and cloud sync remain outside this MVP;
+the current implementation focuses on one dependable, switchable local chat
+with persistent queues and direct access to each supported agent's commands.
 
 ---
 

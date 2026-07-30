@@ -127,3 +127,73 @@ func TestSwitchAddsVisibleBannerButDoesNotTransferIt(t *testing.T) {
 		t.Fatal("expected visible CODEX switch banner")
 	}
 }
+
+func TestDurableQueueExcludesLaterQueuedMessagesFromCurrentPrompt(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "dragon-sync.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	runner := &recordedRunner{}
+	service := NewService(database, runner)
+	conversation, err := service.Start(t.TempDir(), AgentClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := service.Enqueue(conversation.ID, "first queued message")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := service.Enqueue(conversation.ID, "second queued message")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RunQueueItem(context.Background(), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.requests[0].Prompt; got != "first queued message" {
+		t.Fatalf("first prompt included later queue data: %q", got)
+	}
+	active, err := service.Queue(conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ID != second.ID || active[0].Status != QueueQueued {
+		t.Fatalf("unexpected active queue: %+v", active)
+	}
+	if _, err := service.RunQueueItem(context.Background(), second.ID); err != nil {
+		t.Fatal(err)
+	}
+	active, err = service.Queue(conversation.ID)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("queue was not drained: %+v, %v", active, err)
+	}
+}
+
+func TestNewServiceRecoversInterruptedQueueItem(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "dragon-sync.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	store := NewStore(database)
+	conversation, err := store.Create(t.TempDir(), AgentCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _, err := store.Enqueue(conversation.ID, AgentCodex, "survive restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginQueueItem(item.ID); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(database, &recordedRunner{})
+	queue, err := service.Queue(conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 1 || queue[0].Status != QueueQueued {
+		t.Fatalf("interrupted queue was not recovered: %+v", queue)
+	}
+}

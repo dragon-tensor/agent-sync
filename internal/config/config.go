@@ -17,8 +17,11 @@ type Config struct {
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
 	dataDir := filepath.Join(home, ".agent-sync")
+	if override := os.Getenv("DRAGON_SYNC_DATA_DIR"); override != "" {
+		dataDir = override
+	}
 
-	return &Config{
+	config := &Config{
 		DBPath:  filepath.Join(dataDir, "agent-sync.db"),
 		DataDir: dataDir,
 		defaultPaths: map[string]string{
@@ -27,6 +30,10 @@ func DefaultConfig() *Config {
 			"codex":       filepath.Join(home, ".codex", "sessions"),
 		},
 	}
+	if override := os.Getenv("DRAGON_SYNC_DB_PATH"); override != "" {
+		config.DBPath = override
+	}
+	return config
 }
 
 func (c *Config) DefaultPath(provider string) string {

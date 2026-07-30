@@ -27,7 +27,9 @@ func Run() error {
 		return err
 	}
 	defer database.Close()
-	program := tui.NewProgram(chat.NewService(database, nil))
+	service := chat.NewService(database, nil)
+	defer service.Close()
+	program := tui.NewProgram(service)
 	_, err = program.Run()
 	return err
 }

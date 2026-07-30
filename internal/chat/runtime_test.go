@@ -34,6 +34,21 @@ func TestParseMetricsFromAgentEvents(t *testing.T) {
 	}
 }
 
+func TestParseACPUsageCost(t *testing.T) {
+	value := map[string]any{
+		"sessionUpdate": "usage_update",
+		"used":          float64(2048),
+		"size":          float64(8192),
+		"cost":          map[string]any{"amount": 0.25, "currency": "USD"},
+	}
+	metrics := findMetrics(value)
+	metrics.ContextUsed = int(findNumber(value, "used"))
+	metrics.ContextWindow = int(findNumber(value, "size"))
+	if metrics.ContextUsed != 2048 || metrics.ContextWindow != 8192 || metrics.CostUSD != 0.25 {
+		t.Fatalf("unexpected ACP usage: %+v", metrics)
+	}
+}
+
 func TestACPAgentMapping(t *testing.T) {
 	if kind, ok := acpKind(AgentOpenCode); !ok || kind != "opencode" {
 		t.Fatalf("got %q %t", kind, ok)
@@ -41,4 +56,44 @@ func TestACPAgentMapping(t *testing.T) {
 	if _, ok := acpKind(AgentClaude); ok {
 		t.Fatal("claude must not use ACP")
 	}
+}
+
+func TestPTYResumeCommandsUseNativeSession(t *testing.T) {
+	command, args, id, err := ptyCommand(AgentClaude, "claude-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command != "claude" || id != "claude-session" || !containsPair(args, "--resume", "claude-session") {
+		t.Fatalf("unexpected Claude PTY command: %q %q %q", command, args, id)
+	}
+	command, args, id, err = ptyCommand(AgentCodex, "codex-thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command != "codex" || id != "codex-thread" || !containsPair(args, "resume", "codex-thread") {
+		t.Fatalf("unexpected Codex PTY command: %q %q %q", command, args, id)
+	}
+}
+
+func TestACPAvailableCommandsAreNormalizedAndDeduplicated(t *testing.T) {
+	value := map[string]any{
+		"sessionUpdate": "available_commands_update",
+		"availableCommands": []any{
+			map[string]any{"name": "model", "description": "Choose model"},
+			map[string]any{"name": "/model", "description": "Latest description"},
+		},
+	}
+	commands := commandsFrom(value)
+	if len(commands) != 1 || commands[0].Name != "/model" || commands[0].Description != "Latest description" {
+		t.Fatalf("unexpected commands: %+v", commands)
+	}
+}
+
+func containsPair(values []string, first, second string) bool {
+	for index := 0; index+1 < len(values); index++ {
+		if values[index] == first && values[index+1] == second {
+			return true
+		}
+	}
+	return false
 }
